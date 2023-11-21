@@ -19,6 +19,7 @@ package raft
 
 import (
 	//	"bytes"
+	"log/slog"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -27,7 +28,6 @@ import (
 	//	"6.5840/labgob"
 	"6.5840/labrpc"
 )
-
 
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
@@ -63,18 +63,18 @@ const (
 type LogEntry struct {
 	Term_    int         // Leader接收到该log时的任期
 	Idx_     int         // Log的固定下标，在所有的服务器都是相同的，不会被改变.类似TCP的序列号，也是一个累计确认，
-	Command_ interface{} //
+	Command_ interface{} // 空接口，类似于std::any吧，go语言中几乎所有数据结构最底层都是interface
 }
 
 const (
 	// 声明在函数外部，首字母小写则包内可见，大写则所有包可见
-	heartBeatTimeout    = 100 * time.Millisecond
-	electionTimeoutBase = 200 * time.Millisecond
+	heartBeatTimeout             = 100 * time.Millisecond
+	electionTimeoutBase          = 200 * time.Millisecond
 	electionTimeoutRandIncrement = 150
 )
 
 func GetRandomElectionTimeout() time.Duration {
-	return electionTimeoutBase + time.Duration(rand.Intn(electionTimeoutRandIncrement)) * time.Millisecond
+	return electionTimeoutBase + time.Duration(rand.Intn(electionTimeoutRandIncrement))*time.Millisecond
 }
 
 // A Go object implementing a single Raft peer.
@@ -89,22 +89,27 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
-	// Persistent state
+	// Persistent state on all servers
 	cur_term_  int        // 服务器知道的最近任期，当服务器启动时初始化为0，单调递增
 	voted_for_ int        // 当前任期中，该服务器给投过票的candidateId，如果没有则为null
 	logs_      []LogEntry // 日志条目；每一条包含了状态机指令以及该条目被leader收到时的任期号]
 
-	// Volatile state
-	commit_idx_   int // 已知被提交的最高日志条目索引号，一开始是0，单调递增
-	last_applied_ int // 应用到状态机的最高日志条目索引号，一开始为0，单调递增
+	// Volatile state on all servers
+	// 当一条日志(也代表之前的都完成了)被复制到大多数节点上时就是commit，然后leader会通知所有follower多少日志commit了,然后就可以apply。所以通常应该是[last_applied_, commit_idx_]一个窗口一样
+	commit_idx_   int // 已知被提交(大多数复制)的最高日志条目索引号，一开始是0，单调递增,(leader根据大多数复制来设定,而follower是min(leader_commit_idx, index of last new entry))
+	last_applied_ int // 应用到状态机(应用到上层存储中的)的最高日志条目索引号，一开始为0，单调递增
 
-	// Leader volatile state
-	next_idx_  []int // 针对所有的服务器，内容是需要发送给每个服务器下一条日志条目索引号(初始化为leader的最高索引号+1)
-	match_idx_ []int // 针对所有的服务器，内容是已知要复制到每个服务器上的最高日志条目号，初始化为0，单调递增
+	// Volatile state on leader
+	next_idx_  []int // 针对所有的服务器，内容是需要发送给每个服务器下一条日志条目索引号(初始化为leader的最高索引号+1)nextIndex为乐观估计，指代 leader 保留的对应 follower 的下一个需要传输的日志条目，
+	match_idx_ []int // 针对所有的服务器，内容是已经复制到每个服务器上的最高日志条目号，初始化为0，单调递增
 
-	role_    Role
+	role_     Role
+	apply_ch_ chan ApplyMsg // 用来通知上层状态机执行cmd
+
 	timeout_ time.Duration
-	ticker_  *time.Ticker
+	ticker_  *time.Ticker // 对于leader来说就是心跳计时器，那么对于follower来说就是选举计时器
+
+	replicator_cv_ []*sync.Cond // 用于唤醒所有的异步日志发送线程
 }
 
 // return currentTerm and whether this server
@@ -134,7 +139,7 @@ func (rf *Raft) SetTerm(term int) {
 
 func (rf *Raft) GetRole() Role {
 	rf.mu.Lock()
-	rf.mu.Unlock()
+	defer rf.mu.Unlock()
 
 	return rf.role_
 }
@@ -155,10 +160,13 @@ func (rf *Raft) SetVotedFor(voted_for int) {
 	rf.voted_for_ = voted_for
 }
 
-
-func (rf *Raft) GetSize() int {
+func (rf *Raft) PeersSize() int {
 
 	return len(rf.peers)
+}
+
+func (rf *Raft) LogBack() LogEntry {
+	return rf.logs_[len(rf.logs_)-1]
 }
 
 func (rf *Raft) ResetTicker() {
@@ -240,7 +248,6 @@ func (rf *Raft) readPersist(data []byte) {
 	// }
 }
 
-
 // the service says it has created a snapshot that has
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
@@ -253,24 +260,62 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
-// agreement and return immediately. there is no guarantee that this
-// command will ever be committed to the Raft log, since the leader
-// may fail or lose an election. even if the Raft instance has been killed,
+// agreement and return immediately.
+// there is no guarantee that this command will ever be committed to the Raft log,
+// since the leader may fail or lose an election. even if the Raft instance has been killed,
 // this function should return gracefully.
 //
 // the first return value is the index that the command will appear at
 // if it's ever committed. the second return value is the current
 // term. the third return value is true if this server believes it is
 // the leader.
+// 这个函数只是尝试在一个可能是leader的节点上去尝试一个command,具体后面是否会成功还要通过channel来知道Star
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
-	isLeader := true
+	// isLeader := true
+	is_leader := false
 
 	// Your code here (2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
+	if rf.role_ != RoleLeader {
+		return index, term, is_leader
+	}
 
-	return index, term, isLeader
+	slog.Info("Leader start a command", "leader", rf.me, "command", command, "term", rf.cur_term_)
+	log_entry := rf.AppendNewEntry(command)
+
+	for i := range rf.peers {
+		if i != rf.me {
+			rf.replicator_cv_[i].Signal()
+		}
+	}
+
+	index = log_entry.Idx_
+	term = log_entry.Term_
+	is_leader = true
+
+	return index, term, is_leader
+}
+
+func (rf *Raft) AppendNewEntry(command interface{}) LogEntry {
+	log_entry := LogEntry{
+		Term_:    rf.cur_term_,
+		Idx_:     len(rf.logs_),
+		Command_: command,
+	}
+
+	rf.logs_ = append(rf.logs_, log_entry)
+	rf.match_idx_[rf.me] += 1
+	rf.next_idx_[rf.me] += 1
+
+	if rf.next_idx_[rf.me] != rf.match_idx_[rf.me]+1 {
+		slog.Error("Next index is not match match_index", "next_idx", rf.next_idx_[rf.me], "match_idx", rf.match_idx_[rf.me])
+	}
+
+	return log_entry
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -300,25 +345,36 @@ func (rf *Raft) ticker() {
 		select {
 		case <-rf.ticker_.C:
 
-			switch rf.GetRole() {
-			case RoleFollower:
-				rf.mu.Lock()
+			// NOTE: go的switch相当于每个case自带break
+			// switch rf.GetRole() {
+			// case RoleFollower:
+			// 	rf.mu.Lock()
+			// 	rf.SetRole(RoleCandidate)
+			// 	rf.mu.Unlock()
+			// 	fallthrough
+			// case RoleCandidate: // 此时应该是对应着选举失败？
+			// 	rf.mu.Lock()
+			// 	rf.ResetTicker()
+			// 	rf.StartElection()
+			// 	rf.mu.Unlock()
+			// case RoleLeader:
+			// 	rf.mu.Lock()
+			// 	rf.ResetHeartBeat()
+			// 	// log.Printf("%v periodically broadcast heart beat\n", rf.me)
+			// 	rf.BroadcastHeartBeat()
+			// 	rf.mu.Unlock()
+			// }
+			rf.mu.Lock()
+			if rf.role_ == RoleFollower || rf.role_ == RoleCandidate {
 				rf.SetRole(RoleCandidate)
-				rf.mu.Unlock()
-
-			case RoleCandidate: // 此时应该是对应着选举失败？
-				rf.mu.Lock()
 				rf.ResetTicker()
 				rf.StartElection()
-				rf.mu.Unlock()
-				fallthrough
-			case RoleLeader:
-				rf.mu.Lock()
+			} else if rf.role_ == RoleLeader {
 				rf.ResetHeartBeat()
 				// log.Printf("%v periodically broadcast heart beat\n", rf.me)
-				rf.BroadcastHeartBeat()
-				rf.mu.Unlock()
+				rf.BroadcastHeartBeat(false)
 			}
+			rf.mu.Unlock()
 		}
 
 		// // pause for a random amount of time between 50 and 350
@@ -345,22 +401,26 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf := &Raft{
-		peers: peers,
+		peers:     peers,
 		persister: persister,
-		me: me,
+		me:        me,
 
-		cur_term_: 0,
+		cur_term_:  0,
 		voted_for_: -1,
-		logs_: make([]LogEntry, 1),
+		logs_:      make([]LogEntry, 1), // 哨兵
 
-		commit_idx_: 0,
+		commit_idx_:   0,
 		last_applied_: 0,
 
-		match_idx_: make([]int, 0),
-		next_idx_: make([]int, 0),
+		match_idx_: make([]int, len(peers)),
+		next_idx_:  make([]int, len(peers)),
 
-		role_: RoleFollower,
+		role_:     RoleFollower,
+		apply_ch_: applyCh,
+
 		timeout_: GetRandomElectionTimeout(),
+
+		replicator_cv_: make([]*sync.Cond, len(peers)),
 	}
 
 	rf.ticker_ = time.NewTicker(rf.timeout_)
@@ -368,9 +428,17 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
+	for i := range rf.peers {
+		rf.next_idx_[i] = len(rf.logs_)
+		rf.match_idx_[i] = 0
+		if i != rf.me {
+			rf.replicator_cv_[i] = sync.NewCond(&sync.Mutex{})
+			go rf.Replicator(i)
+		}
+	}
+
 	// start ticker goroutine to start elections
 	go rf.ticker()
-
 
 	return rf
 }

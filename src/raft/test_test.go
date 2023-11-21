@@ -8,12 +8,15 @@ package raft
 // test with the original before submitting.
 //
 
-import "testing"
-import "fmt"
-import "time"
-import "math/rand"
-import "sync/atomic"
-import "sync"
+import (
+	"fmt"
+	"log"
+	"math/rand"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
@@ -285,6 +288,7 @@ func TestFailAgree2B(t *testing.T) {
 	// disconnect one follower from the network.
 	leader := cfg.checkOneLeader()
 	cfg.disconnect((leader + 1) % servers)
+	log.Printf("Disconnect server %v", (leader + 1) % servers)
 
 	// the leader and remaining follower should be
 	// able to agree despite the disconnected follower.
@@ -296,6 +300,7 @@ func TestFailAgree2B(t *testing.T) {
 
 	// re-connect
 	cfg.connect((leader + 1) % servers)
+	log.Printf("Reconnect server %v", (leader + 1) % servers)
 
 	// the full set of servers should preserve
 	// previous agreements, and be able to agree
@@ -471,7 +476,9 @@ func TestRejoin2B(t *testing.T) {
 	// leader network failure
 	leader1 := cfg.checkOneLeader()
 	cfg.disconnect(leader1)
+	log.Printf("Disconnect leader %v", leader1)
 
+	// 在旧leader上添加一些log是无法成功的
 	// make old leader try to agree on some entries
 	cfg.rafts[leader1].Start(102)
 	cfg.rafts[leader1].Start(103)
@@ -483,10 +490,13 @@ func TestRejoin2B(t *testing.T) {
 	// new leader network failure
 	leader2 := cfg.checkOneLeader()
 	cfg.disconnect(leader2)
+	log.Printf("Disconnect leader %v", leader2)
 
 	// old leader connected again
 	cfg.connect(leader1)
+	log.Printf("Connect leader %v", leader1)
 
+	// BUG: 因为选出新的leader会立刻发送心跳,告诉之前的分区旧leader,现在的commit index,从而导致了就分区leader一些根本没有commit的本应该删掉的log,现在开始apply
 	cfg.one(104, 2, true)
 
 	// all together now
