@@ -46,6 +46,37 @@ func (rf *Raft) RequestVoteRPC(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Term_ = rf.cur_term_ // maybe bigger than candidate‘s term，for candidate update himself
 	reply.Vote_granted_ = false
 
+	// 任期判断
+	if args.Term_ < rf.cur_term_ {
+		slog.Debug("反对,因为选举人term小", "candidate", args.CandidateId_, "term", args.Term_, "server", rf.me, "cur_term", rf.cur_term_);
+		return
+	}
+
+	try_vote := func () bool  {
+		// Raft使用投票过程来阻止没有所有提交日志的candidate赢得选举。candidate必须联系集群的大多数才能被选举，
+		// 这意味着每个提交的条目都必须至少存在于这些服务器中的一个里。
+		// 如果candidate的日志与大多数服务器的日志(在下面精确定义了"up-to-date")一样新(up-to-date)，
+		// 则它将保存所有提交的条目。
+
+		// Raft通过比较日志中最后一个条目的索引和任期来确定两个日志中哪个是最新(up-to-date)。
+		// 1 如果日志中的最后一个条目具有不同的任期，则带有较新任期的日志将是最新的。
+		// 2 如果日志以相同的任期结尾，则更大索引的日志是最新的。
+		if(args.Last_log_term_ > rf.GetLastLogTerm() || (args.Last_log_term_ == rf.GetLastLogTerm() && args.Last_log_index_ >= rf.GetLastLogIndex())) {
+			// 投票后重置自己的election timeout，防止马上自己又升级candidate又开始新选举。只要自己的票投不出去，自己又收不到心跳/日志更新，那么自己就可能变candidate
+			rf.ResetTicker()
+			rf.SetRole(RoleFollower)
+			reply.Vote_granted_ = true;
+			// TODO(gukele): 和set term一起序列化一次就行了
+			rf.SetVotedFor(args.CandidateId_)
+
+			slog.Info("支持", "candidate", args.CandidateId_, "term", args.Term_, "server", rf.me, "cur_term", rf.cur_term_)
+			return true
+		} else {
+			slog.Debug("反对,因为日志不匹配", "candidate", args.CandidateId_, "term", args.Term_, "candidate_last_log_term", args.Last_log_term_, "candidate_last_log_index", args.Last_log_index_, "server", rf.me, "cur_term", rf.cur_term_, "server_last_log_term", rf.GetLastLogTerm(), "server_last_log_index", rf.GetLastLogIndex());
+			return false
+		}
+	}
+
 	// 新的选举期了，不管你之前是否投过票，不管你是leader还是candidate,你现在需要重新投票了
 	if args.Term_ > rf.cur_term_ {
 		rf.voted_for_ = -1
@@ -58,36 +89,14 @@ func (rf *Raft) RequestVoteRPC(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 		// NOTE(gukele): 搅屎棍问题，当有一个节点发生网络分区的问题，他就不停的选举失败，term变得很大，当其重新连接到集群，会让大家以为新的一轮选举，但是它日志落后，不可能成为新的leader,最终它就成为一个搅屎棍，然后让集群整个term变大了
 		rf.SetRole(RoleFollower) // 降为follower？可能是搅屎棍让leader降级；也可能是leader掉线后第一轮选举失败，candidate降级
-	}
-
-	// 任期判断
-	if args.Term_ < rf.cur_term_ {
-		slog.Debug("反对,因为选举人term小", "candidate", args.CandidateId_, "term", args.Term_, "server", rf.me, "cur_term", rf.cur_term_);
+		try_vote()
 		return
 	}
 
 	if args.Term_ == rf.cur_term_ {
 		// 没有投过票 或者 之前的reply丢包了需要重新发
 		if rf.GetVotedFor() == -1 || rf.GetVotedFor() == args.CandidateId_ {
-			// Raft使用投票过程来阻止没有所有提交日志的candidate赢得选举。candidate必须联系集群的大多数才能被选举，
-			// 这意味着每个提交的条目都必须至少存在于这些服务器中的一个里。
-			// 如果candidate的日志与大多数服务器的日志(在下面精确定义了"up-to-date")一样新(up-to-date)，
-			// 则它将保存所有提交的条目。
-
-			// Raft通过比较日志中最后一个条目的索引和任期来确定两个日志中哪个是最新(up-to-date)。
-			// 1 如果日志中的最后一个条目具有不同的任期，则带有较新任期的日志将是最新的。
-			// 2 如果日志以相同的任期结尾，则更大索引的日志是最新的。
-			if(args.Last_log_term_ > rf.GetLastLogTerm() || (args.Last_log_term_ == rf.GetLastLogTerm() && args.Last_log_index_ >= rf.GetLastLogIndex())) {
-				// 投票后重置自己的election timeout，防止马上自己又升级candidate又开始新选举。只要自己的票投不出去，自己又收不到心跳/日志更新，那么自己就可能变candidate
-				rf.ResetTicker()
-				rf.SetRole(RoleFollower)
-				reply.Vote_granted_ = true;
-				slog.Info("支持", "candidate", args.CandidateId_, "term", args.Term_, "server", rf.me, "cur_term", rf.cur_term_)
-				rf.SetVotedFor(args.CandidateId_)
-				return
-			} else {
-				slog.Debug("反对,因为日志不匹配", "candidate", args.CandidateId_, "term", args.Term_, "candidate_last_log_term", args.Last_log_term_, "candidate_last_log_index", args.Last_log_index_, "server", rf.me, "cur_term", rf.cur_term_, "server_last_log_term", rf.GetLastLogTerm(), "server_last_log_index", rf.GetLastLogIndex());
-			}
+			try_vote()
 		} else {
 			slog.Debug("反对,因为已经投给别人", "candidate", args.CandidateId_, "term", args.Term_, "server", rf.me, "votee_for", rf.voted_for_);
 		}
@@ -129,7 +138,7 @@ func (rf *Raft) SendRequestVoteRPC(server int, args *RequestVoteArgs, reply *Req
 	}
 
 	ok := rf.peers[server].Call("Raft.RequestVoteRPC", args, reply)
-	// FIXME: 这里是一直给一个节点发请求投票，如果一直收不到，那么就无限重复？我觉得应该是，身份改变以后就不发了，无论是变成leader还是follower
+	// FIXME: 这里是一直给一个节点发请求投票，如果一直收不到，那么就无限重复？我觉得应该是，身份改变以后就不发了，无论是变成leader还是follower。这里不需要控制不停发送把，应该是外部去控制
 	// 现在觉得是,直接发送一次,拉票不需要重发
 	// for !ok {
 	// 	if rf.killed() {
@@ -145,10 +154,13 @@ func (rf *Raft) SendRequestVoteRPC(server int, args *RequestVoteArgs, reply *Req
  * 选举成功则会马上唤醒ticker
  */
 func (rf *Raft) StartElection() {
+	rf.mu.Lock()
+
 	// 给自己投票
-	rf.cur_term_ += 1
 	slog.Info("Candidate begin election", "candidate", rf.me, "term", rf.cur_term_);
+	rf.cur_term_ += 1
 	rf.voted_for_ = rf.me
+	rf.persist()
 	voted_count := 1 // 自己给自己的一票
 
 	// NOTE(gukele):逃逸分析！ 局部栈上变量is ok,go支持逃逸分析，会将对象转为堆上对象。
@@ -158,6 +170,8 @@ func (rf *Raft) StartElection() {
 		Last_log_index_: rf.GetLastLogIndex(),
 		Last_log_term_: rf.GetLastLogTerm(),
 	}
+
+	rf.mu.Unlock()
 
 	for server := range rf.peers {
 		if server == rf.me {
@@ -182,18 +196,14 @@ func (rf *Raft) RequestVoteAndHandleReply(server int, args *RequestVoteArgs, vot
 		if rf.role_ == RoleCandidate && rf.cur_term_ == args.Term_ {
 			if reply.Term_ > rf.cur_term_ {
 				rf.SetRole(RoleFollower)
-				rf.SetTerm(reply.Term_)
 				rf.SetVotedFor(-1)
+				rf.SetTerm(reply.Term_)
 				rf.ResetTicker()
 			} else if reply.Vote_granted_ {
 				// log.Printf("%v get a vote from %v in term %v \n", rf.me, server, args.Term_)
 				*voted_count += 1
 				// log.Printf("voted count is %v now, and half is %v\n", voted_count, len(rf.peers) / 2 + 1)
 				if *voted_count == len(rf.peers) / 2 + 1 { // 只在第一次到达大多数时唤醒
-					slog.Warn("============We get a leader================ ", "leader", rf.me, "term", rf.cur_term_)
-					rf.ResetHeartBeat()
-					rf.BroadcastHeartBeat(true)
-					rf.SetRole(RoleLeader)
 
 					// 新选出的leader应该做一些初始化
 					for idx := range rf.peers {
@@ -206,7 +216,14 @@ func (rf *Raft) RequestVoteAndHandleReply(server int, args *RequestVoteArgs, vot
 						rf.match_idx_[idx] = 0
 					}
 
-					slog.Debug("New leader broadcast heart beat immediately", "leader", rf.me, "term", rf.cur_term_)
+					slog.Warn("============We get a leader================ ", "leader", rf.me, "term", rf.cur_term_)
+					rf.SetRole(RoleLeader)
+
+					rf.mu.Unlock()
+					rf.BroadcastHeartBeat(true)
+					rf.mu.Lock()
+
+					slog.Info("New leader broadcast heart beat immediately", "leader", rf.me, "term", rf.cur_term_)
 				}
 			}
 		}

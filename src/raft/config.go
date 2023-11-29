@@ -8,20 +8,24 @@ package raft
 // test with the original before submitting.
 //
 
-import "6.5840/labgob"
-import "6.5840/labrpc"
-import "bytes"
-import "log"
-import "sync"
-import "sync/atomic"
-import "testing"
-import "runtime"
-import "math/rand"
-import crand "crypto/rand"
-import "math/big"
-import "encoding/base64"
-import "time"
-import "fmt"
+import (
+	"bytes"
+	"log"
+	"math/rand"
+	"runtime"
+	"sync"
+	"sync/atomic"
+	"testing"
+
+	"6.5840/labgob"
+	"6.5840/labrpc"
+
+	crand "crypto/rand"
+	"encoding/base64"
+	"fmt"
+	"math/big"
+	"time"
+)
 
 func randstring(n int) string {
 	b := make([]byte, 2*n)
@@ -113,10 +117,8 @@ func (cfg *config) crash1(i int) {
 	cfg.mu.Lock()
 	defer cfg.mu.Unlock()
 
-	// a fresh persister, in case old instance
-	// continues to update the Persister.
-	// but copy old persister's content so that we always
-	// pass Make() the last persisted state.
+	// a fresh persister, in case old instance continues to update the Persister.
+	// but copy old persister's content so that we always pass Make() the last persisted state.
 	if cfg.saved[i] != nil {
 		cfg.saved[i] = cfg.saved[i].Copy()
 	}
@@ -129,6 +131,7 @@ func (cfg *config) crash1(i int) {
 		cfg.rafts[i] = nil
 	}
 
+	// ???上面不是拷贝过吗
 	if cfg.saved[i] != nil {
 		raftlog := cfg.saved[i].ReadRaftState()
 		snapshot := cfg.saved[i].ReadSnapshot()
@@ -555,7 +558,7 @@ func (cfg *config) wait(index int, n int, startTerm int) interface{} {
 // times, in case a leader fails just after Start().
 // if retry==false, calls Start() only once, in order
 // to simplify the early Lab 2B tests.
-// 就是start一个cmd,然后查看是否有expectedServers个以上的server提交了它.若提交返回该log的index
+// 就是start一个cmd,然后查看是否有expectedServers个以上的server提交了它.若提交返回该log的index. retry == false则在leader start()成功后2s超时时间内检查是否有expectedServers复制了该日志,不会重复尝试
 func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 	t0 := time.Now()
 	starts := 0
@@ -571,7 +574,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			}
 			cfg.mu.Unlock()
 			if rf != nil {
-				index1, _, ok := rf.Start(cmd) // 尝试在leader上start一条命令
+				index1, _, ok := rf.Start(cmd) // 尝试在可能是leader的server上start一条命令
 				if ok {
 					index = index1
 					break
@@ -580,8 +583,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 		}
 
 		if index != -1 {
-			// somebody claimed to be the leader and to have
-			// submitted our command; wait a while for agreement.
+			// somebody claimed to be the leader and to have submitted our command; wait a while for agreement.
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := cfg.nCommitted(index)

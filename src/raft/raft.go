@@ -103,6 +103,7 @@ type Raft struct {
 	next_idx_  []int // 针对所有的服务器，内容是需要发送给每个服务器下一条日志条目索引号(初始化为leader的最高索引号+1)nextIndex为乐观估计，指代 leader 保留的对应 follower 的下一个需要传输的日志条目，
 	match_idx_ []int // 针对所有的服务器，内容是已经复制到每个服务器上的最高日志条目号，初始化为0，单调递增
 
+	// TODO(gukele)：role和term有比较设置成原子变量吗，在发送日志添加和心跳的时候都判断是否是leader，避免中途role改变不再是leader后还继续发送心跳或日志添加
 	role_     Role
 	apply_ch_ chan ApplyMsg // 用来通知上层状态机执行cmd
 
@@ -135,6 +136,7 @@ func (rf *Raft) SetTerm(term int) {
 	}
 
 	rf.cur_term_ = term
+	rf.persist()
 }
 
 func (rf *Raft) GetRole() Role {
@@ -145,7 +147,9 @@ func (rf *Raft) GetRole() Role {
 }
 
 func (rf *Raft) SetRole(role Role) {
-
+	if role == RoleLeader && rf.role_ != RoleLeader {
+		rf.ResetHeartBeat()
+	}
 	rf.role_ = role
 }
 
@@ -158,6 +162,7 @@ func (rf *Raft) SetVotedFor(voted_for int) {
 
 	// make sure equal or voted_for_ == -1 ???
 	rf.voted_for_ = voted_for
+	rf.persist()
 }
 
 func (rf *Raft) PeersSize() int {
@@ -210,57 +215,12 @@ func (rf *Raft) GetLastLogTerm() int {
 	return last_term
 }
 
-// save Raft's persistent state to stable storage,
-// where it can later be retrieved after a crash and restart.
-// see paper's Figure 2 for a description of what should be persistent.
-// before you've implemented snapshots, you should pass nil as the
-// second argument to persister.Save().
-// after you've implemented snapshots, pass the current snapshot
-// (or nil if there's not yet a snapshot).
-func (rf *Raft) persist() {
-	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
-}
-
-// restore previously persisted state.
-func (rf *Raft) readPersist(data []byte) {
-	if data == nil || len(data) < 1 { // bootstrap without any state?
-		return
-	}
-	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
-}
-
-// the service says it has created a snapshot that has
-// all info up to and including index. this means the
-// service no longer needs the log through (and including)
-// that index. Raft should now trim its log as much as possible.
-func (rf *Raft) Snapshot(index int, snapshot []byte) {
-	// Your code here (2D).
-
-}
 
 // the service using Raft (e.g. a k/v server) wants to start
-// agreement on the next command to be appended to Raft's log. if this
-// server isn't the leader, returns false. otherwise start the
-// agreement and return immediately.
+// agreement on the next command to be appended to Raft's log.
+// if this server isn't the leader, returns false.
+// otherwise start the agreement and return immediately.
+//
 // there is no guarantee that this command will ever be committed to the Raft log,
 // since the leader may fail or lose an election. even if the Raft instance has been killed,
 // this function should return gracefully.
@@ -312,8 +272,10 @@ func (rf *Raft) AppendNewEntry(command interface{}) LogEntry {
 	rf.next_idx_[rf.me] += 1
 
 	if rf.next_idx_[rf.me] != rf.match_idx_[rf.me]+1 {
-		slog.Error("Next index is not match match_index", "next_idx", rf.next_idx_[rf.me], "match_idx", rf.match_idx_[rf.me])
+		// slog.Error("Next index is not match match_index", "next_idx", rf.next_idx_[rf.me], "match_idx", rf.match_idx_[rf.me])
+		Debug(dLog, "Next index=%v is not match match index=%v", rf.next_idx_[rf.me], rf.next_idx_[rf.me])
 	}
+	rf.persist()
 
 	return log_entry
 }
@@ -368,13 +330,15 @@ func (rf *Raft) ticker() {
 			if rf.role_ == RoleFollower || rf.role_ == RoleCandidate {
 				rf.SetRole(RoleCandidate)
 				rf.ResetTicker()
+				rf.mu.Unlock()
 				rf.StartElection()
 			} else if rf.role_ == RoleLeader {
 				rf.ResetHeartBeat()
-				// log.Printf("%v periodically broadcast heart beat\n", rf.me)
+				rf.mu.Unlock()
+
 				rf.BroadcastHeartBeat(false)
 			}
-			rf.mu.Unlock()
+			// rf.mu.Unlock()
 		}
 
 		// // pause for a random amount of time between 50 and 350
@@ -425,9 +389,6 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 
 	rf.ticker_ = time.NewTicker(rf.timeout_)
 
-	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
-
 	for i := range rf.peers {
 		rf.next_idx_[i] = len(rf.logs_)
 		rf.match_idx_[i] = 0
@@ -436,6 +397,9 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 			go rf.Replicator(i)
 		}
 	}
+
+	// initialize from state persisted before a crash
+	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
 	go rf.ticker()

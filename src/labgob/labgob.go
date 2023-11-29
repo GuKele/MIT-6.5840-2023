@@ -5,6 +5,7 @@ package labgob
 // misbehavior, including both mysterious incorrect computation and
 // outright crashes. so this wrapper around Go's encoding/gob warns
 // about non-capitalized field names.
+// 大概就是封装了官方的gob，然后对尝试对有lower-case成员变量的结构体进行序列化时会输出错误
 //
 
 import "encoding/gob"
@@ -24,6 +25,7 @@ type LabEncoder struct {
 }
 
 func NewEncoder(w io.Writer) *LabEncoder {
+	// 看起来像个单例啊
 	enc := &LabEncoder{}
 	enc.gob = gob.NewEncoder(w)
 	return enc

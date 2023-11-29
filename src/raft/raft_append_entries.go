@@ -1,8 +1,8 @@
 package raft
 
 import (
-	"sort"
 	"log/slog"
+	"sort"
 )
 
 type AppendEntriesArgs struct {
@@ -10,10 +10,10 @@ type AppendEntriesArgs struct {
 	Leader_id_           int
 	Leader_commit_index_ int // 大多数复制的index，用来让follower来判断是否可以apply到上层状态机
 
-	Prev_log_index_      int // 本次发给该节点的log的前一条log的下标和term,用来让follower节点判断是否接受本次新发的日志（接受本次log要保证之前的log都接收到了）
-	Prev_log_term_       int
+	Prev_log_index_ int // 本次发给该节点的log的前一条log的下标和term,用来让follower节点判断是否接受本次新发的日志（接受本次log要保证之前的log都接收到了）
+	Prev_log_term_  int
 
-	Entries_             []LogEntry // 空则表示是心跳
+	Entries_ []LogEntry // 空则表示是心跳
 
 	Match_idx_ int // 心跳或者append log失败时,用来判断apply
 	// TODO(gukele): 发送一条还是多条？如果是多条，出现极端情况下，一直跟follower的log不同步，代价太大了;如果是发送单条，出现了可以发送多种情况时，又浪费
@@ -30,13 +30,14 @@ func (rf *Raft) AppendEntriesRPC(args *AppendEntriesArgs, reply *AppendEntriesRe
 	defer rf.mu.Unlock()
 
 	reply.Term_ = rf.cur_term_
+	reply.Success_ = false
 
 	// 如果我是candidate，现在产生了leader的任期比自己大，那么自己应该变成follower吧
 	if args.Leader_Term_ < rf.cur_term_ {
 		if len(args.Entries_) == 0 {
-			slog.Info("不接受心跳, 因为server的term小", "leader",args.Leader_id_, "leader_term", args.Leader_Term_, "server", rf.me, "server_term",rf.cur_term_, "immediately", args.Immediately_)
+			slog.Info("不接受心跳, 因为server的term大", "leader", args.Leader_id_, "leader_term", args.Leader_Term_, "server", rf.me, "server_term", rf.cur_term_, "immediately", args.Immediately_)
 		} else {
-			slog.Info("不接受日志, 因为server的term小", "leader",args.Leader_id_, "leader_term", args.Leader_Term_, "server", rf.me, "server_term",rf.cur_term_, "immediately", args.Immediately_)
+			slog.Info("不接受日志, 因为server的term大", "leader", args.Leader_id_, "leader_term", args.Leader_Term_, "server", rf.me, "server_term", rf.cur_term_, "immediately", args.Immediately_)
 		}
 
 		reply.Success_ = false
@@ -64,19 +65,20 @@ func (rf *Raft) AppendEntriesRPC(args *AppendEntriesArgs, reply *AppendEntriesRe
 			// BUG: 如果是心跳,不能保证此时更新[old_commit_index, new_commit_index]的log是和leader一致的, 如果此时是分区的旧leader刚连接上,可能会有大量的垃圾log.
 			// 比如你之前断开连接但是被不停的start好几个日志，等你连上后变为follower，因为leader发了一个commit index，自己就应用了错误日志.
 			// 除非这里也需要判断prev log index、term是否匹配，或者带上match？
-			if len(rf.logs_) - 1 == args.Prev_log_index_ && rf.logs_[args.Prev_log_index_].Term_ == args.Prev_log_term_ {
+			if len(rf.logs_)-1 == args.Prev_log_index_ && rf.logs_[args.Prev_log_index_].Term_ == args.Prev_log_term_ {
 				rf.commit_idx_ = Min(args.Leader_commit_index_, rf.GetLastLogIndex())
 			}
 			// log.Printf("Follower %v accept heart beat from leader %v in term %v", rf.me, args.Leader_id_, args.Leader_Term_)
 		} else { // 日志
 			// 如果日志条数对不上,或者prev log term对不上,说明prev log index是错误的
-			if len(rf.logs_) - 1 < args.Prev_log_index_ || rf.logs_[args.Prev_log_index_].Term_ != args.Prev_log_term_ {
+			if len(rf.logs_)-1 < args.Prev_log_index_ || rf.logs_[args.Prev_log_index_].Term_ != args.Prev_log_term_ {
 				slog.Debug("前边日志对不上,server不接受该日志", "server", rf.me)
 				reply.Success_ = false
 			} else {
 				reply.Success_ = true
 				rf.logs_ = rf.logs_[:args.Prev_log_index_+1]
 				rf.logs_ = append(rf.logs_, args.Entries_...)
+				rf.persist()
 
 				rf.commit_idx_ = Min(args.Leader_commit_index_, rf.GetLastLogIndex())
 
@@ -119,13 +121,13 @@ func (rf *Raft) SendAppendEntriesRPC(server int, args *AppendEntriesArgs, reply 
 	}
 
 	ok := rf.peers[server].Call("Raft.AppendEntriesRPC", args, reply)
-	// FIXME: 也不能无限发送吧,
-	for retry := 0; !ok && retry < 2; retry += 1 {
-		if rf.killed() {
-			return false
-		}
-		ok = rf.peers[server].Call("Raft.AppendEntriesRPC", args, reply)
-	}
+	// FIXME: 也不能无限发送吧
+	// for retry := 0; !ok && retry < 1; retry += 1 {
+	// 	if rf.killed() {
+	// 		return false
+	// 	}
+	// 	ok = rf.peers[server].Call("Raft.AppendEntriesRPC", args, reply)
+	// }
 
 	return ok
 }
@@ -134,16 +136,19 @@ func (rf *Raft) SendAppendEntriesRPC(server int, args *AppendEntriesArgs, reply 
  * Broadcast heartbeat without lock!
  */
 func (rf *Raft) BroadcastHeartBeat(immediately bool) {
-	// if args.Leader_Term_ < 3 {
-	// 	log.Printf("Leader %v broad cast heart beat in term %v", rf.me, rf.cur_term_)
-	// }
-
 	for idx := range rf.peers {
 		if idx == rf.me {
 			continue
 		}
 
 		go func(server int) {
+			rf.mu.Lock()
+			if rf.role_ != RoleLeader {
+				rf.mu.Unlock()
+				return
+			}
+			slog.Debug("发送心跳.", "leader", rf.me, "term", rf.cur_term_, "server", server)
+
 			// 发送心跳
 			args := AppendEntriesArgs{
 				Leader_Term_:         rf.cur_term_,
@@ -156,6 +161,8 @@ func (rf *Raft) BroadcastHeartBeat(immediately bool) {
 				Immediately_:         false,
 			}
 
+			rf.mu.Unlock()
+
 			if immediately { // for test
 				args.Immediately_ = true
 			}
@@ -166,23 +173,21 @@ func (rf *Raft) BroadcastHeartBeat(immediately bool) {
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
 
+				if reply.Success_ == false {
+					slog.Debug("Leader handle heartbeat reply.", "leader", rf.me, "leader_term", rf.cur_term_, "args_term", args.Leader_Term_, "server", server, "reply", reply)
+				}
+
 				// FIXME: 对RPC回应做处理之前,判断一下是否和发送RPC之前状态一样
 				if rf.cur_term_ == args.Leader_Term_ && rf.role_ == RoleLeader {
 					if reply.Term_ > rf.cur_term_ && reply.Success_ == false {
 						rf.ResetTicker()
 						rf.SetRole(RoleFollower)
-						slog.Info("Leader遇到更大的term, leader became follower", "small_term", rf.cur_term_, "big_term", reply.Term_);
 						rf.SetTerm(reply.Term_)
+						slog.Info("发送心跳失败，遇到更大的term, leader became follower.", "leader_term", rf.cur_term_, "args_term", args.Leader_Term_, "big_term", reply.Term_)
 					}
 				}
-
-				// if reply.Success_ == false {
-				// 	rf.ResetTicker()
-				// 	rf.SetRole(RoleFollower)
-				// 	log.Printf("Leader %v change term %v to %v and role after heart beat22222", rf.me, args.Leader_Term_, reply.Term_)
-				// 	rf.SetTerm(reply.Term_)
-				// }
-
+			} else {
+				// TODO(gukele): 是否需要统计心跳回应的count，如果加上自己没有一半，自己也就不是leader了. 不允许小分区leader的存在,并且这个很难啊，需要规定时间内返回的，而且心跳也没编号啊
 			}
 		}(idx)
 	}
@@ -223,24 +228,26 @@ func (rf *Raft) NeedReplicating(server int) bool {
 
 func (rf *Raft) AppendEntriesOneRound(server int) {
 	rf.mu.Lock()
-	// log.Printf("server is %v, prev log index is %v \n",server, rf.next_idx_[server] - 1)
+	if rf.role_ != RoleLeader {
+		rf.mu.Unlock()
+		return
+	}
+
 	args := AppendEntriesArgs{
 		Leader_Term_:         rf.cur_term_,
 		Leader_id_:           rf.me,
 		Leader_commit_index_: rf.commit_idx_,
 		Prev_log_index_:      rf.next_idx_[server] - 1,
-		Prev_log_term_:       rf.logs_[rf.next_idx_[server] - 1].Term_,
+		Prev_log_term_:       rf.logs_[rf.next_idx_[server]-1].Term_,
 		Entries_:             rf.logs_[rf.next_idx_[server]:],
 		Match_idx_:           rf.match_idx_[server],
 	}
 	rf.mu.Unlock()
 
 	reply := AppendEntriesReply{}
-	// log.Printf("server is %v, append entries rpc begin", server)
 	if rf.SendAppendEntriesRPC(server, &args, &reply) {
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
-		// log.Printf("server is %v, prev log index is %v", server, args.Prev_log_index_)
 		// FIXME: 根据返回结果处理,这里是否需要判断是不是还是leader?
 		if rf.cur_term_ == args.Leader_Term_ && rf.role_ == RoleLeader {
 			if reply.Success_ {
@@ -254,12 +261,8 @@ func (rf *Raft) AppendEntriesOneRound(server int) {
 				sort.Ints(match_idx)
 				new_commit_idx := match_idx[len(rf.peers)/2]
 
-				// BUG(gukele): leader重启后commit数组初始化为0，所以有更大的commit index时才更新
 				if rf.commit_idx_ < new_commit_idx {
-					// log.Printf("Next index nums : %v", rf.next_idx_)
-					// log.Printf("Match index nums : %v", rf.match_idx_)
-					// log.Printf("Leader %v have new commit index %v and command %v", rf.me, new_commit_idx, rf.logs_[new_commit_idx].Command_)
-					slog.Info("Leader有新的commit index", "leader", rf.me, "commit index", new_commit_idx)
+					slog.Info("Leader有新的commit index.", "leader", rf.me, "commit index", new_commit_idx)
 					rf.commit_idx_ = new_commit_idx
 				}
 
@@ -277,9 +280,14 @@ func (rf *Raft) AppendEntriesOneRound(server int) {
 				if reply.Term_ > rf.cur_term_ {
 					rf.SetTerm(reply.Term_)
 					rf.SetRole(RoleFollower)
+					rf.ResetTicker()
+					slog.Info("日志添加失败，遇到更大的term, leader became follower.", "leader_term", rf.cur_term_, "server_term", reply.Term_)
 				} else {
-					// TODO(gukele): 折半？折半带来的优化应该也很小
+					// TODO(gukele): 折半？折半挺扯淡的。。
+					// 或者可以考虑递增，类似tcp窗口，或者分块
+					// 还有就是找到reply的任期的第一条日志
 					rf.next_idx_[server] -= 1
+					slog.Debug("Leader的next idx回退", "leader", args.Leader_id_, "server", server, "next_index", rf.next_idx_[server])
 				}
 			}
 		}
