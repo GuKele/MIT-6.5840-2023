@@ -19,7 +19,7 @@ package raft
 
 import (
 	//	"bytes"
-	"log/slog"
+	// "log/slog"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -135,6 +135,7 @@ func (rf *Raft) SetTerm(term int) {
 		return
 	}
 
+	Debug(dTerm, "S%v Term update %v -> %v", rf.me, rf.cur_term_, term)
 	rf.cur_term_ = term
 	rf.persist()
 }
@@ -149,6 +150,10 @@ func (rf *Raft) GetRole() Role {
 func (rf *Raft) SetRole(role Role) {
 	if role == RoleLeader && rf.role_ != RoleLeader {
 		rf.ResetHeartBeat()
+		Debug(dLeader, "S%v Converting to leader at T:%v", rf.me, rf.cur_term_)
+	}
+	if role == RoleCandidate {
+		Debug(dTerm, "S%v Converting to candidate, begin election T:%v", rf.me, rf.cur_term_)
 	}
 	rf.role_ = role
 }
@@ -244,7 +249,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return index, term, is_leader
 	}
 
-	slog.Info("Leader start a command", "leader", rf.me, "command", command, "term", rf.cur_term_)
+	// slog.Info("Leader start a command", "leader", rf.me, "command", command, "term", rf.cur_term_)
+	Debug(dClient, "S%v start a command:%v at T:%v", rf.me, command, rf.cur_term_)
 	log_entry := rf.AppendNewEntry(command)
 
 	for i := range rf.peers {
@@ -300,8 +306,9 @@ func (rf *Raft) killed() bool {
 }
 
 func (rf *Raft) ticker() {
-	for rf.killed() == false {
+	Debug(dInfo, "S%v start	at T:%v LLI:%v", rf.me, rf.cur_term_, rf.GetLastLogIndex())
 
+	for rf.killed() == false {
 		// Your code here (2A)
 		// Check if a leader election should be started.
 		select {
@@ -328,7 +335,6 @@ func (rf *Raft) ticker() {
 			// }
 			rf.mu.Lock()
 			if rf.role_ == RoleFollower || rf.role_ == RoleCandidate {
-				rf.SetRole(RoleCandidate)
 				rf.ResetTicker()
 				rf.mu.Unlock()
 				rf.StartElection()
@@ -400,6 +406,9 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+
+	// log 初始化
+	LogInit()
 
 	// start ticker goroutine to start elections
 	go rf.ticker()

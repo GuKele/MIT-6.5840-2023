@@ -9,7 +9,7 @@ import (
 )
 
 // Debugging
-const DEBUG = false
+const DEBUG = true
 
 type logTopic string
 const (
@@ -29,6 +29,7 @@ const (
 	dTrace   logTopic = "TRCE"
 	dVote    logTopic = "VOTE"
 	dWarn    logTopic = "WARN"
+	dHeart   logTopic = "HEAR"
 )
 
 
@@ -50,7 +51,7 @@ func getVerbosity() int {
 var debugStart time.Time
 var debugVerbosity int
 
-func init() {
+func LogInit() {
 	debugVerbosity = getVerbosity()
 	debugStart = time.Now()
 

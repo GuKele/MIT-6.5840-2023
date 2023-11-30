@@ -1,7 +1,7 @@
 package raft
 
 import (
-	"log/slog"
+	// "log/slog"
 	// "fmt"
 	// "time"
 )
@@ -17,7 +17,7 @@ type RequestVoteArgs struct {
 	// Raft通过比较日志中最后一个条目的索引和任期来确定两个日志中哪个是最新(up-to-date)。
 	// 如果日志中的最后一个条目具有不同的任期，则带有较新任期的日志将是最新的。 如果日志以相同的任期结尾，则更大索引的日志是最新的。
 	Term_          int // candidate的任期号
-	CandidateId_   int // 发起投票的candidate的ID
+	Candidate_id_   int // 发起投票的candidate的ID
 	Last_log_term_ int // candidate的最高日志条目的任期号
 	Last_log_index_ int // candidate的最高日志条目索引.
 }
@@ -41,14 +41,15 @@ func (rf *Raft) RequestVoteRPC(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	// log.Printf("%v receive %v request vote in term %v \n", rf.me, args.CandidateId_, args.Term_)
+	Debug(dVote, "S%v S%v request for vote at T%v", rf.me, args.Candidate_id_, args.Term_)
 
 	reply.Term_ = rf.cur_term_ // maybe bigger than candidate‘s term，for candidate update himself
 	reply.Vote_granted_ = false
 
 	// 任期判断
 	if args.Term_ < rf.cur_term_ {
-		slog.Debug("反对,因为选举人term小", "candidate", args.CandidateId_, "term", args.Term_, "server", rf.me, "cur_term", rf.cur_term_);
+		// slog.Debug("反对,因为选举人term小", "candidate", args.CandidateId_, "term", args.Term_, "server", rf.me, "cur_term", rf.cur_term_);
+		Debug(dVote, "S%v Not vote S%v (T%v > T%v)", rf.me, args.Candidate_id_, rf.cur_term_, args.Term_)
 		return
 	}
 
@@ -67,12 +68,14 @@ func (rf *Raft) RequestVoteRPC(args *RequestVoteArgs, reply *RequestVoteReply) {
 			rf.SetRole(RoleFollower)
 			reply.Vote_granted_ = true;
 			// TODO(gukele): 和set term一起序列化一次就行了
-			rf.SetVotedFor(args.CandidateId_)
+			rf.SetVotedFor(args.Candidate_id_)
 
-			slog.Info("支持", "candidate", args.CandidateId_, "term", args.Term_, "server", rf.me, "cur_term", rf.cur_term_)
+			Debug(dVote, "S%v Vote S%v", rf.me, args.Candidate_id_)
+			// slog.Info("支持", "candidate", args.CandidateId_, "term", args.Term_, "server", rf.me, "cur_term", rf.cur_term_)
 			return true
 		} else {
-			slog.Debug("反对,因为日志不匹配", "candidate", args.CandidateId_, "term", args.Term_, "candidate_last_log_term", args.Last_log_term_, "candidate_last_log_index", args.Last_log_index_, "server", rf.me, "cur_term", rf.cur_term_, "server_last_log_term", rf.GetLastLogTerm(), "server_last_log_index", rf.GetLastLogIndex());
+			// slog.Debug("反对,因为日志不匹配", "candidate", args.CandidateId_, "term", args.Term_, "candidate_last_log_term", args.Last_log_term_, "candidate_last_log_index", args.Last_log_index_, "server", rf.me, "cur_term", rf.cur_term_, "server_last_log_term", rf.GetLastLogTerm(), "server_last_log_index", rf.GetLastLogIndex());
+			Debug(dVote, "S%v Not vote S%v, the former's LT:%v LI%v > LT:%v LI%v", rf.me, args.Candidate_id_, rf.GetLastLogTerm(), rf.GetLastLogIndex(), args.Last_log_term_, args.Last_log_index_)
 			return false
 		}
 	}
@@ -95,10 +98,11 @@ func (rf *Raft) RequestVoteRPC(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	if args.Term_ == rf.cur_term_ {
 		// 没有投过票 或者 之前的reply丢包了需要重新发
-		if rf.GetVotedFor() == -1 || rf.GetVotedFor() == args.CandidateId_ {
+		if rf.GetVotedFor() == -1 || rf.GetVotedFor() == args.Candidate_id_ {
 			try_vote()
 		} else {
-			slog.Debug("反对,因为已经投给别人", "candidate", args.CandidateId_, "term", args.Term_, "server", rf.me, "votee_for", rf.voted_for_);
+			// slog.Debug("反对,因为已经投给别人", "candidate", args.CandidateId_, "term", args.Term_, "server", rf.me, "votee_for", rf.voted_for_);
+			Debug(dVote, "S%v Not vote S%v, already vote to S%v", rf.me, args.Candidate_id_, rf.GetVotedFor())
 		}
 	}
 }
@@ -157,16 +161,17 @@ func (rf *Raft) StartElection() {
 	rf.mu.Lock()
 
 	// 给自己投票
-	slog.Info("Candidate begin election", "candidate", rf.me, "term", rf.cur_term_);
+	// slog.Info("Candidate begin election", "candidate", rf.me, "term", rf.cur_term_);
 	rf.cur_term_ += 1
 	rf.voted_for_ = rf.me
+	rf.SetRole(RoleCandidate)
 	rf.persist()
 	voted_count := 1 // 自己给自己的一票
 
 	// NOTE(gukele):逃逸分析！ 局部栈上变量is ok,go支持逃逸分析，会将对象转为堆上对象。
 	args := RequestVoteArgs{
 		Term_:          rf.cur_term_,
-		CandidateId_:   rf.me,
+		Candidate_id_:   rf.me,
 		Last_log_index_: rf.GetLastLogIndex(),
 		Last_log_term_: rf.GetLastLogTerm(),
 	}
@@ -200,11 +205,10 @@ func (rf *Raft) RequestVoteAndHandleReply(server int, args *RequestVoteArgs, vot
 				rf.SetTerm(reply.Term_)
 				rf.ResetTicker()
 			} else if reply.Vote_granted_ {
-				// log.Printf("%v get a vote from %v in term %v \n", rf.me, server, args.Term_)
 				*voted_count += 1
-				// log.Printf("voted count is %v now, and half is %v\n", voted_count, len(rf.peers) / 2 + 1)
-				if *voted_count == len(rf.peers) / 2 + 1 { // 只在第一次到达大多数时唤醒
+				Debug(dVote, "S%v <- S%v Got vote", rf.me, server)
 
+				if *voted_count == len(rf.peers) / 2 + 1 { // 只在第一次到达大多数时唤醒
 					// 新选出的leader应该做一些初始化
 					for idx := range rf.peers {
 						if idx == rf.me {
@@ -216,14 +220,14 @@ func (rf *Raft) RequestVoteAndHandleReply(server int, args *RequestVoteArgs, vot
 						rf.match_idx_[idx] = 0
 					}
 
-					slog.Warn("============We get a leader================ ", "leader", rf.me, "term", rf.cur_term_)
+					// slog.Warn("============We get a leader================ ", "leader", rf.me, "term", rf.cur_term_)
 					rf.SetRole(RoleLeader)
 
 					rf.mu.Unlock()
 					rf.BroadcastHeartBeat(true)
 					rf.mu.Lock()
 
-					slog.Info("New leader broadcast heart beat immediately", "leader", rf.me, "term", rf.cur_term_)
+					// slog.Info("New leader broadcast heart beat immediately", "leader", rf.me, "term", rf.cur_term_)
 				}
 			}
 		}

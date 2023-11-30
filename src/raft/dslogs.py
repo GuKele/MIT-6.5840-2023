@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 import sys
 import shutil
 from typing import Optional, List, Tuple, Dict
@@ -28,7 +28,26 @@ TOPICS = {
     "WARN": "#d08341",
     "ERRO": "#fe2626",
     "TRCE": "#fe2626",
+    "HEAR": "cyan",
 }
+# TOPICS = {
+#     "TIMR": "bright_black",
+#     "VOTE": "bright_cyan",
+#     "LEAD": "yellow",
+#     "TERM": "green",
+#     "LOG1": "blue",
+#     "LOG2": "cyan",
+#     "CMIT": "magenta",
+#     "PERS": "white",
+#     "SNAP": "bright_blue",
+#     "DROP": "bright_red",
+#     "CLNT": "bright_green",
+#     "TEST": "bright_magenta",
+#     "INFO": "bright_white",
+#     "WARN": "bright_yellow",
+#     "ERRO": "red",
+#     "TRCE": "red",
+# }
 # fmt: on
 
 

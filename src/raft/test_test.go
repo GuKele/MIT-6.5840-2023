@@ -11,7 +11,6 @@ package raft
 import (
 	"fmt"
 	"log"
-	"log/slog"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -289,7 +288,7 @@ func TestFailAgree2B(t *testing.T) {
 	// disconnect one follower from the network.
 	leader := cfg.checkOneLeader()
 	cfg.disconnect((leader + 1) % servers)
-	log.Printf("Disconnect server %v", (leader + 1) % servers)
+	log.Printf("Disconnect server %v", (leader+1)%servers)
 
 	// the leader and remaining follower should be
 	// able to agree despite the disconnected follower.
@@ -301,7 +300,7 @@ func TestFailAgree2B(t *testing.T) {
 
 	// re-connect
 	cfg.connect((leader + 1) % servers)
-	log.Printf("Reconnect server %v", (leader + 1) % servers)
+	log.Printf("Reconnect server %v", (leader+1)%servers)
 
 	// the full set of servers should preserve
 	// previous agreements, and be able to agree
@@ -746,22 +745,22 @@ func TestMy12C(t *testing.T) {
 
 	cfg.one(10+index, servers, true)
 	index++
-	slog.Warn("完成第一个cmd")
+	Debug(dTest, "完成第一个cmd")
 
 	leader1 := cfg.checkOneLeader()
 
 	cfg.disconnect((leader1) % servers)
 	time.Sleep(RaftElectionTimeout)
 
-	cfg.one(10+index, servers - 1, true)
+	cfg.one(10+index, servers-1, true)
 	index++
-	slog.Warn("完成第二个cmd")
+	Debug(dTest, "完成第二个cmd")
 
 	cfg.connect((leader1) % servers)
 
 	cfg.one(10+index, servers, true)
 	index++
-	slog.Warn("完成第三个cmd")
+	Debug(dTest, "完成第三个cmd")
 
 	cfg.end()
 }
@@ -776,7 +775,7 @@ func TestMy22C(t *testing.T) {
 
 	cfg.one(10+index, servers, true)
 	index++
-	slog.Warn("完成第一个cmd")
+	Debug(dTest, "完成第一个cmd")
 
 	leader1 := cfg.checkOneLeader()
 
@@ -786,15 +785,14 @@ func TestMy22C(t *testing.T) {
 
 	cfg.one(10+index, servers-2, true)
 	index++
-	slog.Warn("完成第二个cmd")
+	Debug(dTest, "完成第二个cmd")
 
 	cfg.connect((leader1) % servers)
 	cfg.connect((leader1 + 1) % servers)
 
-
 	cfg.one(10+index, servers, true)
 	index++
-	slog.Warn("完成第三个cmd")
+	Debug(dTest, "完成第三个cmd")
 
 	cfg.end()
 }
@@ -808,10 +806,10 @@ func TestPersist22C(t *testing.T) {
 
 	index := 1
 	for iters := 0; iters < 5; iters++ {
-		slog.Warn("========================New Round===========================", "round", iters)
+		Debug(dTest, "========================New Round %v===========================", iters)
 		cfg.one(10+index, servers, true)
 		index++
-		slog.Warn("完成第一个cmd", "round", iters)
+		Debug(dTest, "完成第一个cmd Round:%v", iters)
 
 		leader1 := cfg.checkOneLeader()
 
@@ -820,7 +818,7 @@ func TestPersist22C(t *testing.T) {
 
 		cfg.one(10+index, servers-2, true)
 		index++
-		slog.Warn("完成第二个cmd", "round", iters)
+		Debug(dTest, "完成第二个cmd Round:%v", iters)
 
 		cfg.disconnect((leader1 + 0) % servers)
 		cfg.disconnect((leader1 + 3) % servers)
@@ -838,8 +836,7 @@ func TestPersist22C(t *testing.T) {
 
 		cfg.one(10+index, servers-2, true)
 		index++
-		slog.Warn("完成第三个cmd", "round", iters)
-
+		Debug(dTest, "完成第三个cmd Round:%v", iters)
 
 		cfg.connect((leader1 + 4) % servers)
 		cfg.connect((leader1 + 0) % servers)
@@ -848,6 +845,7 @@ func TestPersist22C(t *testing.T) {
 	cfg.one(1000, servers, true)
 
 	cfg.end()
+	Debug(dTest, "Pass!!!")
 }
 
 func TestPersist32C(t *testing.T) {

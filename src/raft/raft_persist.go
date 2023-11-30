@@ -2,7 +2,7 @@ package raft
 
 import (
 	"bytes"
-	"log/slog"
+	// "log/slog"
 
 	"6.5840/labgob"
 )
@@ -28,6 +28,7 @@ func (rf *Raft) persist() {
 	serializer.Encode(rf.logs_)
 	raft_state := wbuf.Bytes()
 	rf.persister.Save(raft_state, nil)
+	Debug(dPersist, "S%v Persist T:%v VF:%v", rf.me, rf.cur_term_, rf.voted_for_)
 }
 
 // restore previously persisted state.
@@ -55,10 +56,12 @@ func (rf *Raft) readPersist(data []byte) {
 	var logs      []LogEntry
 	// 反序列化成功则返回nil
 	if deserializer.Decode(&cur_term) != nil || deserializer.Decode(&voted_for) != nil || deserializer.Decode(&logs) != nil {
-		slog.Error("Deserialization fail when read persist", "server", rf.me)
+		Debug(dError, "S%v Deserialization fail when read persist", rf.me)
 	} else {
 		rf.cur_term_ = cur_term
 		rf.voted_for_ = voted_for
 		rf.logs_ = logs
 	}
+	Debug(dPersist, "S%v Read persist T:%v VF:%v", rf.me, rf.cur_term_, rf.voted_for_)
+
 }
