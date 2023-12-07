@@ -28,7 +28,7 @@ func (rf *Raft) persist() {
 	serializer.Encode(rf.logs_)
 	raft_state := wbuf.Bytes()
 	rf.persister.Save(raft_state, nil)
-	Debug(dPersist, "S%v Persist T:%v VF:%v", rf.me, rf.cur_term_, rf.voted_for_)
+	Debug(dPersist, "S%v Persist T:%v VF:%v LLI:%v", rf.me, rf.cur_term_, rf.voted_for_, rf.GetLastLogId())
 }
 
 // restore previously persisted state.
@@ -51,9 +51,9 @@ func (rf *Raft) readPersist(data []byte) {
 	// }
 	rbuf := bytes.NewBuffer(data)
 	deserializer := labgob.NewDecoder(rbuf)
-	var cur_term  int
+	var cur_term int
 	var voted_for int
-	var logs      []LogEntry
+	var logs []LogEntry
 	// 反序列化成功则返回nil
 	if deserializer.Decode(&cur_term) != nil || deserializer.Decode(&voted_for) != nil || deserializer.Decode(&logs) != nil {
 		Debug(dError, "S%v Deserialization fail when read persist", rf.me)

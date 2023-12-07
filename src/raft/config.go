@@ -10,6 +10,7 @@ package raft
 
 import (
 	"bytes"
+	// "go/doc/comment"
 	"log"
 	"math/rand"
 	"runtime"
@@ -111,6 +112,7 @@ func make_config(t *testing.T, n int, unreliable bool, snapshot bool) *config {
 
 // shut down a Raft server but save its persistent state.
 func (cfg *config) crash1(i int) {
+	Debug(dTest, "S%v Crashing", i)
 	cfg.disconnect(i)
 	cfg.net.DeleteServer(i) // disable client connections to the server.
 
@@ -148,7 +150,7 @@ func (cfg *config) checkLogs(i int, m ApplyMsg) (string, bool) {
 		// old 和 oldok 是interface{},是一个command
 		if old, oldok := cfg.logs[j][m.CommandIndex]; oldok && old != v {
 			// log.Printf("%v: log %v; server %v\n", i, cfg.logs[i], cfg.logs[j])
-			log.Printf("Server %v: log %v; server %v\n", i, cfg.logs[i], cfg.logs[j])
+			Debug(dError, "\n    S%v log:%v\n    S%v log:%v", i, cfg.logs[i], j, cfg.logs[j])
 			// some server has already committed a different value for this entry!
 			err_msg = fmt.Sprintf("commit index=%v server=%v %v != server=%v %v",
 				m.CommandIndex, i, m.Command, j, old)
@@ -278,7 +280,7 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 // this server. since we cannot really kill it.
 func (cfg *config) start1(i int, applier func(int, chan ApplyMsg)) {
 	cfg.crash1(i)
-
+	Debug(dTest, "S%v Starting", i)
 	// a fresh set of outgoing ClientEnd names.
 	// so that old crashed instance's ClientEnds can't send.
 	cfg.endnames[i] = make([]string, cfg.n)
@@ -363,6 +365,7 @@ func (cfg *config) connect(i int) {
 	// fmt.Printf("connect(%d)\n", i)
 
 	cfg.connected[i] = true
+	Debug(dTest, "S%v Connected", i)
 
 	// outgoing ClientEnds
 	for j := 0; j < cfg.n; j++ {
@@ -386,6 +389,7 @@ func (cfg *config) disconnect(i int) {
 	// fmt.Printf("disconnect(%d)\n", i)
 
 	cfg.connected[i] = false
+	Debug(dTest, "S%v Disconnect", i)
 
 	// outgoing ClientEnds
 	for j := 0; j < cfg.n; j++ {
@@ -558,16 +562,20 @@ func (cfg *config) wait(index int, n int, startTerm int) interface{} {
 // times, in case a leader fails just after Start().
 // if retry==false, calls Start() only once, in order
 // to simplify the early Lab 2B tests.
-// 就是start一个cmd,然后查看是否有expectedServers个以上的server提交了它.若提交返回该log的index. retry == false则在leader start()成功后2s超时时间内检查是否有expectedServers复制了该日志,不会重复尝试
+// 就是start一个cmd,然后查看是否有expectedServers个以上的server提交了它.若提交返回该log的index.
+// 如果有server称自己是leader，start()成功后2s超时时间内检查是否有expectedServers复制了该日志,如果此时leader实际上是分区的old leader，两秒后就会超时，如果retry为false就不会重新尝试了，
+// 而retry为true时会重新尝试其他的leader去start
 func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 	t0 := time.Now()
 	starts := 0
 	for time.Since(t0).Seconds() < 10 && cfg.checkFinished() == false {
 		// try all the servers, maybe one is the leader.
 		index := -1
+		var rf *Raft
+
 		for si := 0; si < cfg.n; si++ {
 			starts = (starts + 1) % cfg.n
-			var rf *Raft
+			// var rf *Raft
 			cfg.mu.Lock()
 			if cfg.connected[starts] {
 				rf = cfg.rafts[starts]
@@ -584,10 +592,10 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 
 		if index != -1 {
 			// somebody claimed to be the leader and to have submitted our command; wait a while for agreement.
+			Debug(dTest, "S%v One LI:%v CMD:%v", rf.me, index, cmd)
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := cfg.nCommitted(index)
-				// log.Printf("We have %v server committed", nd)
 				if nd > 0 && nd >= expectedServers {
 					// committed
 					if cmd1 == cmd {
@@ -598,13 +606,17 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 				time.Sleep(20 * time.Millisecond)
 			}
 			if retry == false {
+				nd, _ := cfg.nCommitted(index)
+				Debug(dError, "S%v One(%v) failed without retry %v < Ept:%v", rf.me, cmd, nd, expectedServers)
 				cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 			}
 		} else {
 			time.Sleep(50 * time.Millisecond)
 		}
 	}
+
 	if cfg.checkFinished() == false {
+		Debug(dError, "One(%v) failed with retry", cmd)
 		cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 	}
 	return -1

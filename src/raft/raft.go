@@ -7,7 +7,7 @@ package raft
 //
 // rf = Make(...)
 //   create a new Raft server.
-// rf.Start(command interface{}) (index, term, isleader)
+// rf.Start(command interface{}) (id, term, isleader)
 //   start agreement on a new log entry
 // rf.GetState() (term, isLeader)
 //   ask a Raft for its current term, and whether it thinks it is leader
@@ -20,12 +20,11 @@ package raft
 import (
 	//	"bytes"
 	// "log/slog"
-	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	//	"6.5840/labgob"
+	//	"6.5840/"
 	"6.5840/labrpc"
 )
 
@@ -62,19 +61,8 @@ const (
 
 type LogEntry struct {
 	Term_    int         // Leader接收到该log时的任期
-	Idx_     int         // Log的固定下标，在所有的服务器都是相同的，不会被改变.类似TCP的序列号，也是一个累计确认，
+	Id_      int         // Log的固定索引号，在所有的服务器都是相同的，不会被改变.类似TCP的序列号，也是一个累计确认。(注意并不是在数组中的下标，只是可能刚开始是一样的，在快照后就不一样了，感觉改名字叫LogID更好)
 	Command_ interface{} // 空接口，类似于std::any吧，go语言中几乎所有数据结构最底层都是interface
-}
-
-const (
-	// 声明在函数外部，首字母小写则包内可见，大写则所有包可见
-	heartBeatTimeout             = 100 * time.Millisecond
-	electionTimeoutBase          = 200 * time.Millisecond
-	electionTimeoutRandIncrement = 150
-)
-
-func GetRandomElectionTimeout() time.Duration {
-	return electionTimeoutBase + time.Duration(rand.Intn(electionTimeoutRandIncrement))*time.Millisecond
 }
 
 // A Go object implementing a single Raft peer.
@@ -90,18 +78,19 @@ type Raft struct {
 	// state a Raft server must maintain.
 
 	// Persistent state on all servers
+	// TODO(gukele): 为什么term和vote for需要持久化
 	cur_term_  int        // 服务器知道的最近任期，当服务器启动时初始化为0，单调递增
 	voted_for_ int        // 当前任期中，该服务器给投过票的candidateId，如果没有则为null
 	logs_      []LogEntry // 日志条目；每一条包含了状态机指令以及该条目被leader收到时的任期号]
 
 	// Volatile state on all servers
-	// 当一条日志(也代表之前的都完成了)被复制到大多数节点上时就是commit，然后leader会通知所有follower多少日志commit了,然后就可以apply。所以通常应该是[last_applied_, commit_idx_]一个窗口一样
-	commit_idx_   int // 已知被提交(大多数复制)的最高日志条目索引号，一开始是0，单调递增,(leader根据大多数复制来设定,而follower是min(leader_commit_idx, index of last new entry))
+	// 当一条日志(也代表之前的都完成了)被复制到大多数节点上时就是commit，然后leader会通知所有follower多少日志commit了,然后就可以apply。所以通常应该是[last_applied_, commit_id_]一个窗口一样
+	commit_id_    int // 已知被提交(大多数复制)的最高日志条目索引号，一开始是0，单调递增,(leader根据大多数复制来设定,而follower是min(leader_commit_id, id of last new entry))
 	last_applied_ int // 应用到状态机(应用到上层存储中的)的最高日志条目索引号，一开始为0，单调递增
 
 	// Volatile state on leader
-	next_idx_  []int // 针对所有的服务器，内容是需要发送给每个服务器下一条日志条目索引号(初始化为leader的最高索引号+1)nextIndex为乐观估计，指代 leader 保留的对应 follower 的下一个需要传输的日志条目，
-	match_idx_ []int // 针对所有的服务器，内容是已经复制到每个服务器上的最高日志条目号，初始化为0，单调递增
+	next_id_  []int // 针对所有的服务器，内容是需要发送给每个服务器下一条日志条目索引号(初始化为leader的最高索引号+1)nextIndex为乐观估计，指代 leader 保留的对应 follower 的下一个需要传输的日志条目，
+	match_id_ []int // 针对所有的服务器，内容是已经复制到每个服务器上的最高日志条目索引号，初始化为0，单调递增
 
 	// TODO(gukele)：role和term有比较设置成原子变量吗，在发送日志添加和心跳的时候都判断是否是leader，避免中途role改变不再是leader后还继续发送心跳或日志添加
 	role_     Role
@@ -137,6 +126,7 @@ func (rf *Raft) SetTerm(term int) {
 
 	Debug(dTerm, "S%v Term update %v -> %v", rf.me, rf.cur_term_, term)
 	rf.cur_term_ = term
+	rf.voted_for_ = -1
 	rf.persist()
 }
 
@@ -153,7 +143,7 @@ func (rf *Raft) SetRole(role Role) {
 		Debug(dLeader, "S%v Converting to leader at T:%v", rf.me, rf.cur_term_)
 	}
 	if role == RoleCandidate {
-		Debug(dTerm, "S%v Converting to candidate, begin election T:%v", rf.me, rf.cur_term_)
+		Debug(dTerm, "S%v Converting to candidate, begin election T:%v LLT:%v LLI:%v", rf.me, rf.cur_term_, rf.GetLastLogTerm(), rf.GetLastLogId())
 	}
 	rf.role_ = role
 }
@@ -166,8 +156,12 @@ func (rf *Raft) GetVotedFor() int {
 func (rf *Raft) SetVotedFor(voted_for int) {
 
 	// make sure equal or voted_for_ == -1 ???
-	rf.voted_for_ = voted_for
-	rf.persist()
+	if rf.voted_for_ != voted_for {
+		rf.voted_for_ = voted_for
+		Debug(dVote, "S%v Vote S%v", rf.me, voted_for)
+
+		rf.persist()
+	}
 }
 
 func (rf *Raft) PeersSize() int {
@@ -198,29 +192,6 @@ func (rf *Raft) ResetHeartBeat() {
 	rf.ticker_.Reset(rf.timeout_)
 }
 
-func (rf *Raft) GetLastTermAndIndex() (int, int) {
-
-	return rf.GetLastLogTerm(), rf.GetLastLogIndex()
-}
-
-func (rf *Raft) GetLastLogIndex() int {
-
-	var last_index = len(rf.logs_) - 1
-	return last_index
-}
-
-func (rf *Raft) GetLastLogTerm() int {
-
-	var last_term = 0
-
-	if rf.GetLastLogIndex() >= 0 {
-		last_term = rf.logs_[rf.GetLastLogIndex()].Term_
-	}
-
-	return last_term
-}
-
-
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log.
 // if this server isn't the leader, returns false.
@@ -230,13 +201,13 @@ func (rf *Raft) GetLastLogTerm() int {
 // since the leader may fail or lose an election. even if the Raft instance has been killed,
 // this function should return gracefully.
 //
-// the first return value is the index that the command will appear at
+// the first return value is the id that the command will appear at
 // if it's ever committed. the second return value is the current
 // term. the third return value is true if this server believes it is
 // the leader.
 // 这个函数只是尝试在一个可能是leader的节点上去尝试一个command,具体后面是否会成功还要通过channel来知道Star
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
+	id := -1
 	term := -1
 	// isLeader := true
 	is_leader := false
@@ -246,12 +217,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	defer rf.mu.Unlock()
 
 	if rf.role_ != RoleLeader {
-		return index, term, is_leader
+		return id, term, is_leader
 	}
 
-	// slog.Info("Leader start a command", "leader", rf.me, "command", command, "term", rf.cur_term_)
-	Debug(dClient, "S%v start a command:%v at T:%v", rf.me, command, rf.cur_term_)
 	log_entry := rf.AppendNewEntry(command)
+	Debug(dClient, "S%v start a command:%v at T:%v LLI:%v", rf.me, command, rf.cur_term_, rf.GetLastLogId())
+	rf.persist()
 
 	for i := range rf.peers {
 		if i != rf.me {
@@ -259,29 +230,27 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		}
 	}
 
-	index = log_entry.Idx_
+	id = log_entry.Id_
 	term = log_entry.Term_
 	is_leader = true
 
-	return index, term, is_leader
+	return id, term, is_leader
 }
 
 func (rf *Raft) AppendNewEntry(command interface{}) LogEntry {
 	log_entry := LogEntry{
 		Term_:    rf.cur_term_,
-		Idx_:     len(rf.logs_),
+		Id_:      rf.GetLastLogId() + 1,
 		Command_: command,
 	}
 
 	rf.logs_ = append(rf.logs_, log_entry)
-	rf.match_idx_[rf.me] += 1
-	rf.next_idx_[rf.me] += 1
+	rf.match_id_[rf.me] += 1
+	rf.next_id_[rf.me] += 1
 
-	if rf.next_idx_[rf.me] != rf.match_idx_[rf.me]+1 {
-		// slog.Error("Next index is not match match_index", "next_idx", rf.next_idx_[rf.me], "match_idx", rf.match_idx_[rf.me])
-		Debug(dLog, "Next index=%v is not match match index=%v", rf.next_idx_[rf.me], rf.next_idx_[rf.me])
+	if rf.next_id_[rf.me] != rf.match_id_[rf.me]+1 {
+		Debug(dError, "Next id=%v is not match match id=%v", rf.next_id_[rf.me], rf.next_id_[rf.me])
 	}
-	rf.persist()
 
 	return log_entry
 }
@@ -306,7 +275,7 @@ func (rf *Raft) killed() bool {
 }
 
 func (rf *Raft) ticker() {
-	Debug(dInfo, "S%v start	at T:%v LLI:%v", rf.me, rf.cur_term_, rf.GetLastLogIndex())
+	Debug(dInfo, "S%v start	at T:%v LLI:%v", rf.me, rf.cur_term_, rf.GetLastLogId())
 
 	for rf.killed() == false {
 		// Your code here (2A)
@@ -379,11 +348,11 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 		voted_for_: -1,
 		logs_:      make([]LogEntry, 1), // 哨兵
 
-		commit_idx_:   0,
+		commit_id_:    0,
 		last_applied_: 0,
 
-		match_idx_: make([]int, len(peers)),
-		next_idx_:  make([]int, len(peers)),
+		match_id_: make([]int, len(peers)),
+		next_id_:  make([]int, len(peers)),
 
 		role_:     RoleFollower,
 		apply_ch_: applyCh,
@@ -396,8 +365,8 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.ticker_ = time.NewTicker(rf.timeout_)
 
 	for i := range rf.peers {
-		rf.next_idx_[i] = len(rf.logs_)
-		rf.match_idx_[i] = 0
+		rf.next_id_[i] = rf.GetLastLogId()
+		rf.match_id_[i] = 0
 		if i != rf.me {
 			rf.replicator_cv_[i] = sync.NewCond(&sync.Mutex{})
 			go rf.Replicator(i)

@@ -971,6 +971,12 @@ func TestUnreliableAgree2C(t *testing.T) {
 	cfg.end()
 }
 
+// func TestSortSearch(t *testing.T) {
+//   rf := Raft{
+// 		logs_: [...]LogEntry{LogEntry{1,}},
+// 	}
+// }
+
 func TestFigure8Unreliable2C(t *testing.T) {
 	servers := 5
 	cfg := make_config(t, servers, true, false)
