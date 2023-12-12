@@ -14,10 +14,10 @@ type RequestVoteArgs struct {
 	// 就是必须持有所有committed的log,因为committed的日志代表着大多数节点已经有了
 	// Raft通过比较日志中最后一个条目的索引和任期来确定两个日志中哪个是最新(up-to-date)。
 	// 如果日志中的最后一个条目具有不同的任期，则带有较新任期的日志将是最新的。 如果日志以相同的任期结尾，则更大索引的日志是最新的。
-	Term_           int // candidate的任期号
-	Candidate_id_   int // 发起投票的candidate的ID
-	Last_log_term_  int // candidate的最高日志条目的任期号
-	Last_log_id_ int // candidate的最高日志条目索引.
+	Term_          int // candidate的任期号
+	Candidate_id_  int // 发起投票的candidate的ID
+	Last_log_term_ int // candidate的最高日志条目的任期号
+	Last_log_id_   int // candidate的最高日志条目索引.
 }
 
 //
@@ -61,7 +61,6 @@ func (rf *Raft) RequestVoteRPC(args *RequestVoteArgs, reply *RequestVoteReply) {
 		// 2 如果日志以相同的任期结尾，则更大索引的日志是最新的。
 		if args.Last_log_term_ > rf.GetLastLogTerm() || (args.Last_log_term_ == rf.GetLastLogTerm() && args.Last_log_id_ >= rf.GetLastLogId()) {
 			// 投票后重置自己的election timeout，防止马上自己又升级candidate又开始新选举。只要自己的票投不出去，自己又收不到心跳/日志更新，那么自己就可能变candidate
-			rf.ResetTicker()
 			rf.SetRole(RoleFollower)
 			reply.Vote_granted_ = true
 			// TODO(gukele): 和set term一起序列化一次就行了
@@ -76,27 +75,24 @@ func (rf *Raft) RequestVoteRPC(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	// 新的选举期了，不管你之前是否投过票，不管你是leader还是candidate,你现在需要重新投票了
 	if args.Term_ > rf.cur_term_ {
+
 		rf.voted_for_ = -1
 		rf.SetTerm(args.Term_)
-
-		// if rf.role_ == RoleLeader {
-		// 	// TODO(gukele): 我们这里判断一下，只有重置了身份才reset？  这里是否真的有必要reset？？？
-		// 	rf.ResetTicker()
-		// }
 
 		// NOTE(gukele): 搅屎棍问题，当有一个节点发生网络分区的问题，他就不停的选举失败，term变得很大，当其重新连接到集群，会让大家以为新的一轮选举，但是它日志落后，不可能成为新的leader,最终它就成为一个搅屎棍，然后让集群整个term变大了
 		rf.SetRole(RoleFollower) // 降为follower？可能是搅屎棍让leader降级；也可能是leader掉线后第一轮选举失败，candidate降级
 		try_vote()
 		return
-	}
 
-	if args.Term_ == rf.cur_term_ {
+	} else if args.Term_ == rf.cur_term_ {
+
 		// 没有投过票 或者 之前的reply丢包了需要重新发
 		if rf.GetVotedFor() == -1 || rf.GetVotedFor() == args.Candidate_id_ {
 			try_vote()
 		} else {
 			Debug(dVote, "S%v Not vote S%v, already vote to S%v", rf.me, args.Candidate_id_, rf.GetVotedFor())
 		}
+
 	}
 }
 
@@ -135,15 +131,10 @@ func (rf *Raft) SendRequestVoteRPC(server int, args *RequestVoteArgs, reply *Req
 	}
 
 	ok := rf.peers[server].Call("Raft.RequestVoteRPC", args, reply)
-	// FIXME: 这里是一直给一个节点发请求投票，如果一直收不到，那么就无限重复？我觉得应该是，身份改变以后就不发了，无论是变成leader还是follower。这里不需要控制不停发送把，应该是外部去控制
-	// 现在觉得是,直接发送一次,拉票不需要重发
-	// for !ok {
-	// 	if rf.killed() {
-	// 		return false
-	// 	}
-	// 	ok = rf.peers[server].Call("Raft.RequestVoteRPC", args, reply)
-	// }
-
+	// 只重试一次！
+	if !ok {
+		ok = rf.peers[server].Call("Raft.RequestVoteRPC", args, reply)
+	}
 	return ok
 }
 
@@ -162,11 +153,13 @@ func (rf *Raft) StartElection() {
 
 	// NOTE(gukele):逃逸分析！ 局部栈上变量is ok,go支持逃逸分析，会将对象转为堆上对象。
 	args := RequestVoteArgs{
-		Term_:           rf.cur_term_,
-		Candidate_id_:   rf.me,
-		Last_log_id_: rf.GetLastLogId(),
-		Last_log_term_:  rf.GetLastLogTerm(),
+		Term_:          rf.cur_term_,
+		Candidate_id_:  rf.me,
+		Last_log_id_:   rf.GetLastLogId(),
+		Last_log_term_: rf.GetLastLogTerm(),
 	}
+
+	rf.ResetTicker()
 
 	rf.mu.Unlock()
 
@@ -181,7 +174,6 @@ func (rf *Raft) StartElection() {
 
 func (rf *Raft) RequestVoteAndHandleReply(server int, args *RequestVoteArgs, voted_count *int) {
 	reply := RequestVoteReply{}
-	// FIXME(gukele): 如果拉票操作丢包等等，需要重传吗？
 	// NOTE(gukele): sending request note must not need lock,we want rf option is parallel
 	if rf.SendRequestVoteRPC(server, args, &reply) {
 
@@ -193,28 +185,16 @@ func (rf *Raft) RequestVoteAndHandleReply(server int, args *RequestVoteArgs, vot
 			if reply.Term_ > rf.cur_term_ {
 				rf.SetRole(RoleFollower)
 				rf.SetTerm(reply.Term_)
-				rf.ResetTicker()
 			} else if reply.Vote_granted_ {
 				*voted_count += 1
 				Debug(dVote, "S%v <- S%v Got vote", rf.me, server)
 
-				if *voted_count == len(rf.peers)/2+1 { // 只在第一次到达大多数时唤醒
-					// 新选出的leader应该做一些初始化
-					for idx := range rf.peers {
-						if idx == rf.me {
-							rf.next_id_[idx] = rf.GetLastLogId() + 1
-							rf.match_id_[idx] = rf.GetLastLogId()
-							continue
-						}
-						rf.next_id_[idx] = rf.GetLastLogId() + 1
-						rf.match_id_[idx] = 0
-					}
+				if *voted_count == len(rf.peers) / 2 + 1 { // 只在第一次到达大多数时唤醒
 
-					// TODO(gukele): 变成leader后需要初始化一下next 和 match吗
 					rf.SetRole(RoleLeader)
 
 					rf.mu.Unlock()
-					rf.BroadcastHeartBeat(true)
+					rf.BroadcastHeartBeat()
 					rf.mu.Lock()
 				}
 			}

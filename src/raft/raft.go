@@ -52,7 +52,7 @@ type ApplyMsg struct {
 type Role int
 
 const (
-	RoleLeader = iota
+	RoleLeader Role = iota
 	RoleFollower
 	// NOTE(gukele): 类似两阶段选举的概念，为了解决搅屎棍term不断增长的问题，
 	// 在成为candidate之前，会有一个pre_candidate的状态RoleCandidate，收到集群大多数节点回复后才会变成candidate
@@ -60,8 +60,8 @@ const (
 )
 
 type LogEntry struct {
-	Term_    int         // Leader接收到该log时的任期
 	Id_      int         // Log的固定索引号，在所有的服务器都是相同的，不会被改变.类似TCP的序列号，也是一个累计确认。(注意并不是在数组中的下标，只是可能刚开始是一样的，在快照后就不一样了，感觉改名字叫LogID更好)
+	Term_    int         // Leader接收到该log时的任期
 	Command_ interface{} // 空接口，类似于std::any吧，go语言中几乎所有数据结构最底层都是interface
 }
 
@@ -78,21 +78,19 @@ type Raft struct {
 	// state a Raft server must maintain.
 
 	// Persistent state on all servers
-	// TODO(gukele): 为什么term和vote for需要持久化
-	cur_term_  int        // 服务器知道的最近任期，当服务器启动时初始化为0，单调递增
-	voted_for_ int        // 当前任期中，该服务器给投过票的candidateId，如果没有则为null
+	cur_term_  int        // 服务器知道的最近任期，当服务器启动时初始化为0，单调递增。
+	voted_for_ int        // 当前任期中，该服务器给投过票的candidateId，如果没有则为null。持久化为了防止一个server在同一term投出多票，假如重启没有持久化这个，就可能投出多票
 	logs_      []LogEntry // 日志条目；每一条包含了状态机指令以及该条目被leader收到时的任期号]
 
 	// Volatile state on all servers
 	// 当一条日志(也代表之前的都完成了)被复制到大多数节点上时就是commit，然后leader会通知所有follower多少日志commit了,然后就可以apply。所以通常应该是[last_applied_, commit_id_]一个窗口一样
-	commit_id_    int // 已知被提交(大多数复制)的最高日志条目索引号，一开始是0，单调递增,(leader根据大多数复制来设定,而follower是min(leader_commit_id, id of last new entry))
+	commit_id_    int // 已知被提交(大多数复制)的最高日志条目索引号，一开始是0，单调递增！！,(leader根据大多数复制来设定,而follower是max(commit_id_, min(leader_commit_id, 本次成功添加的最后一个id))),
 	last_applied_ int // 应用到状态机(应用到上层存储中的)的最高日志条目索引号，一开始为0，单调递增
 
 	// Volatile state on leader
 	next_id_  []int // 针对所有的服务器，内容是需要发送给每个服务器下一条日志条目索引号(初始化为leader的最高索引号+1)nextIndex为乐观估计，指代 leader 保留的对应 follower 的下一个需要传输的日志条目，
-	match_id_ []int // 针对所有的服务器，内容是已经复制到每个服务器上的最高日志条目索引号，初始化为0，单调递增
+	match_id_ []int // 针对所有的服务器，内容是已经复制到每个服务器上的最高日志条目索引号，初始化为0，单调递增！！！
 
-	// TODO(gukele)：role和term有比较设置成原子变量吗，在发送日志添加和心跳的时候都判断是否是leader，避免中途role改变不再是leader后还继续发送心跳或日志添加
 	role_     Role
 	apply_ch_ chan ApplyMsg // 用来通知上层状态机执行cmd
 
@@ -138,13 +136,42 @@ func (rf *Raft) GetRole() Role {
 }
 
 func (rf *Raft) SetRole(role Role) {
-	if role == RoleLeader && rf.role_ != RoleLeader {
-		rf.ResetHeartBeat()
-		Debug(dLeader, "S%v Converting to leader at T:%v", rf.me, rf.cur_term_)
-	}
-	if role == RoleCandidate {
+	switch role {
+	case RoleLeader:
+		if rf.role_ != role {
+			Debug(dLeader, "S%v Converting to leader at T:%v", rf.me, rf.cur_term_)
+
+			// 变成leader后初始化一下next 和 match
+			for peer := range rf.peers {
+				if peer == rf.me {
+					rf.next_id_[peer] = rf.GetLastLogId() + 1
+					rf.match_id_[peer] = rf.GetLastLogId()
+					continue
+				}
+				rf.next_id_[peer] = rf.GetLastLogId() + 1
+				rf.match_id_[peer] = 0
+			}
+
+			// 心跳
+			rf.ResetHeartBeat()
+			// rf.BroadcastHeartBeat()
+
+			// 马上尝试发送一波
+			for peer := range rf.peers {
+				if peer != rf.me {
+					rf.replicator_cv_[peer].Signal()
+				}
+			}
+		}
+	case RoleCandidate:
 		Debug(dTerm, "S%v Converting to candidate, begin election T:%v LLT:%v LLI:%v", rf.me, rf.cur_term_, rf.GetLastLogTerm(), rf.GetLastLogId())
+	case RoleFollower:
+		if rf.role_ != RoleFollower {
+			Debug(dInfo, "S%v %v -> %v", rf.me, rf.role_.String(), role.String())
+		}
+		rf.ResetTicker()
 	}
+
 	rf.role_ = role
 }
 
@@ -209,20 +236,22 @@ func (rf *Raft) ResetHeartBeat() {
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	id := -1
 	term := -1
-	// isLeader := true
 	is_leader := false
 
 	// Your code here (2B).
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	// defer rf.mu.Unlock()
 
 	if rf.role_ != RoleLeader {
+		rf.mu.Unlock()
 		return id, term, is_leader
 	}
 
 	log_entry := rf.AppendNewEntry(command)
 	Debug(dClient, "S%v start a command:%v at T:%v LLI:%v", rf.me, command, rf.cur_term_, rf.GetLastLogId())
 	rf.persist()
+
+	rf.mu.Unlock()
 
 	for i := range rf.peers {
 		if i != rf.me {
@@ -275,43 +304,22 @@ func (rf *Raft) killed() bool {
 }
 
 func (rf *Raft) ticker() {
-	Debug(dInfo, "S%v start	at T:%v LLI:%v", rf.me, rf.cur_term_, rf.GetLastLogId())
+	Debug(dInfo, "S%v Start T:%v LLI:%v", rf.me, rf.cur_term_, rf.GetLastLogId())
 
 	for rf.killed() == false {
 		// Your code here (2A)
 		// Check if a leader election should be started.
 		select {
 		case <-rf.ticker_.C:
-
-			// NOTE: go的switch相当于每个case自带break
-			// switch rf.GetRole() {
-			// case RoleFollower:
-			// 	rf.mu.Lock()
-			// 	rf.SetRole(RoleCandidate)
-			// 	rf.mu.Unlock()
-			// 	fallthrough
-			// case RoleCandidate: // 此时应该是对应着选举失败？
-			// 	rf.mu.Lock()
-			// 	rf.ResetTicker()
-			// 	rf.StartElection()
-			// 	rf.mu.Unlock()
-			// case RoleLeader:
-			// 	rf.mu.Lock()
-			// 	rf.ResetHeartBeat()
-			// 	// log.Printf("%v periodically broadcast heart beat\n", rf.me)
-			// 	rf.BroadcastHeartBeat()
-			// 	rf.mu.Unlock()
-			// }
 			rf.mu.Lock()
 			if rf.role_ == RoleFollower || rf.role_ == RoleCandidate {
-				rf.ResetTicker()
+				// rf.ResetTicker()
 				rf.mu.Unlock()
 				rf.StartElection()
 			} else if rf.role_ == RoleLeader {
-				rf.ResetHeartBeat()
 				rf.mu.Unlock()
 
-				rf.BroadcastHeartBeat(false)
+				rf.BroadcastHeartBeat()
 			}
 			// rf.mu.Unlock()
 		}
@@ -364,20 +372,24 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 
 	rf.ticker_ = time.NewTicker(rf.timeout_)
 
-	for i := range rf.peers {
-		rf.next_id_[i] = rf.GetLastLogId()
-		rf.match_id_[i] = 0
-		if i != rf.me {
-			rf.replicator_cv_[i] = sync.NewCond(&sync.Mutex{})
-			go rf.Replicator(i)
-		}
-	}
+	// log 初始化
+	LogInit()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
-	// log 初始化
-	LogInit()
+	for i := range rf.peers {
+		if i == rf.me {
+			rf.next_id_[i] = rf.GetLastLogId() + 1
+			rf.match_id_[i] = rf.GetLastLogId()
+			continue
+		}
+		rf.next_id_[i] = rf.GetLastLogId() + 1
+		rf.match_id_[i] = 0
+
+		rf.replicator_cv_[i] = sync.NewCond(&sync.Mutex{})
+		go rf.Replicator(i)
+	}
 
 	// start ticker goroutine to start elections
 	go rf.ticker()

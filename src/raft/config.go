@@ -142,7 +142,7 @@ func (cfg *config) crash1(i int) {
 	}
 }
 
-// 检查m
+// 检查i号server的m这条log是否跟其他也已经提交相同id的log内容一样
 func (cfg *config) checkLogs(i int, m ApplyMsg) (string, bool) {
 	err_msg := ""
 	v := m.Command
@@ -616,7 +616,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 	}
 
 	if cfg.checkFinished() == false {
-		Debug(dError, "One(%v) failed with retry", cmd)
+		Debug(dError, "One(%v) failed with retry Ept:%v", cmd, expectedServers)
 		cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 	}
 	return -1

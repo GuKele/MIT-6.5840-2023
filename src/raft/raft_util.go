@@ -8,8 +8,8 @@ import (
 
 const (
 	// 声明在函数外部，首字母小写则包内可见，大写则所有包可见
-	heartBeatTimeout             = 100 * time.Millisecond
-	electionTimeoutBase          = 200 * time.Millisecond
+	heartBeatTimeout             = 50 * time.Millisecond
+	electionTimeoutBase          = 4 * heartBeatTimeout
 	electionTimeoutRandIncrement = 150
 )
 
@@ -23,40 +23,71 @@ func (rf *Raft) GetLastTermAndId() (int, int) {
 }
 
 func (rf *Raft) GetLastLogId() int {
-	return rf.LogBack().Id_
+	return rf.logs_[len(rf.logs_)-1].Id_
 }
 
 func (rf *Raft) GetLastLogTerm() int {
-	return rf.LogBack().Term_
+	return rf.logs_[len(rf.logs_)-1].Term_
 }
 
 // 返回任期为term的第一条日志，如果有的话
-func (rf *Raft) GetFirstLogIndexOfTerm(term int) (int, bool) {
-	idx := sort.Search(len(rf.logs_), func(i int) bool {
+func (rf *Raft) GetFirstLogOfTerm(term int) (LogEntry, bool) {
+	log := LogEntry{}
+	exist := false
+
+	n := len(rf.logs_)
+	idx := sort.Search(n, func(i int) bool {
 		return rf.logs_[i].Term_ >= term
 	})
 
-	return idx, idx != len(rf.logs_) && rf.logs_[idx].Term_ == term
-}
-
-func (rf *Raft) GetLastLogIndexOfTerm(term int) (int, bool) {
-	idx := sort.Search(len(rf.logs_), func(i int) bool {
-		return rf.logs_[i].Term_ < term+1
-	})
-	return idx, idx != len(rf.logs_) && rf.logs_[idx].Term_ == term
-}
-
-func (rf *Raft) GetIndexOfLogId(log_id int) int {
-	idx := sort.Search(len(rf.logs_), func(i int) bool {
-		return rf.logs_[i].Id_ >= log_id
-	})
-	return idx
-}
-
-func (rf *Raft) GetLogOfLogId(log_id int) LogEntry {
-	idx := rf.GetIndexOfLogId(log_id)
-	if idx < len(rf.logs_) {
-		return rf.logs_[idx]
+	if idx < n && rf.logs_[idx].Term_ == term {
+		log = rf.logs_[idx]
+		exist = true
 	}
-	return LogEntry{}
+
+	return log, exist
+}
+
+func (rf *Raft) GetLastLogAtTerm(term int) (LogEntry, bool) {
+	log := LogEntry{}
+	exist := false
+
+	n := len(rf.logs_)
+	left, right := 0, n-1
+	for left < right {
+		mid := left + (right-left+1)/2
+		if rf.logs_[mid].Term_ <= term {
+			left = mid
+		} else {
+			right = mid - 1
+		}
+	}
+
+	if left < n && rf.logs_[left].Term_ == term {
+		log = rf.logs_[left]
+		exist = true
+	}
+
+	return log, exist
+}
+
+func (rf *Raft) GetIndexOfLogId(log_id int) (int, bool) {
+	exist := true
+	idx := log_id - rf.logs_[0].Id_
+
+	if idx >= len(rf.logs_) || idx < 0 {
+		exist = false
+	}
+	return idx, exist
+}
+
+func (rf *Raft) GetLogOfLogId(log_id int) (LogEntry, int, bool) {
+	log := LogEntry{}
+	idx, exist := rf.GetIndexOfLogId(log_id)
+
+	if exist {
+		log = rf.logs_[idx]
+	}
+
+	return log, idx, exist
 }
