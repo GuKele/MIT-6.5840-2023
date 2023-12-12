@@ -1,3 +1,8 @@
+## 变量
+
+### 指针
+go的指针也和c++不一样，好像是int const *，是个顶层const
+
 ## 结构体
 
 ### struct
@@ -11,7 +16,11 @@ type StructName struct {
 ```
 ### ENUM
 ```go
-type FishType int // 或者其他类型
+// stringer -type=FishType 该命令会在同文件夹下创建fish_type_string.go文件，包含该类型的String()函数。
+// 或者使用go::generate指令标记，运行go generate
+// go:generate stringer -type=FishType
+type FishType int // 使用自定义类型来实现更安全的枚举
+
 const (
   A FishType = iota
   B
@@ -36,6 +45,9 @@ func (ob *ClassType) function_name( [parameter list] ) [return_types] {
   函数体
 }
 ```
+go语言传参都是按值复制(传指针也是把指针复制一遍)，只不过go语言里头的map、channel等复制不像c++的拷贝构造函数一样深拷贝，而是一个浅拷贝，所以让人感觉像是传递了引用一样。这点类似于java，但是注意如果一个map、channel没有初始化，即nil，那么你传递到函数中进行修改不会影响到外面，因为浅拷贝的是nil。
+
+但是go语言的slice就有点特殊了，go语言的slice和c++的vector的实现不一样，c++ vector是三个指针(begin, end, cap); 而go的slice是一个指针+两个int(begin, int len, int cap)，这就导致如果你传值，那么你在里头修改已经存在的元素则没问题，但是如果你增删元素， 那么len和cap是不会改变的，甚至当你发生扩容的时候，那个新begin指针也不会改变。所以需要传递slice的指针。
 
 ## switch
 switch的case语句自带break;
@@ -71,6 +83,11 @@ len := len(m)
 
 // 删除键值对
 delete(m, "banana")
+
+// 添加元素
+// 调用append函数必须用原来的切片变量接收返回值
+slice1 = append(slice1, elem1, elem2等)
+slice1 = append(slice1, slice2...) // 有点像c++包展开
 ```
 
 ## range
@@ -100,7 +117,20 @@ sum := func(int a, int b) (int) {
 ```
 
 ## 包
+go get golang.org/xx来下载
+go install 安装
+
 ### bytes
 ### encoding/gob
 ### strconv
 strconv is a package in the Go programming language's standard library that provides functions to convert between strings and numeric values. It includes functions for parsing strings as integers, floats, and other numeric types.
+
+## 输出格式
+``` go
+%v 值的默认格式
+%+v 类似上面，但是输出结构体时会添加字段名字
+%#v 值的go语法表示
+%T 值的类型的go语法表示
+%% 百分号
+%t 单词true或者false
+```
