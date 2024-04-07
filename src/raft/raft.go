@@ -372,9 +372,6 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 
 	rf.ticker_ = time.NewTicker(rf.timeout_)
 
-	// log 初始化
-	LogInit()
-
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 

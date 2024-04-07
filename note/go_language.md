@@ -6,12 +6,15 @@ go的指针也和c++不一样，好像是int const *，是个顶层const
 ## 结构体
 
 ### struct
+
+go语言中成员（函数、变量）首字母大写表示public，首字母小写表示private
+
 ```go
 type StructName struct {
-   member definition
-   member definition
+   member Definition1
+   member Definition2
    ...
-   member definition
+   member definition3
 }
 ```
 ### ENUM
@@ -134,3 +137,13 @@ strconv is a package in the Go programming language's standard library that prov
 %% 百分号
 %t 单词true或者false
 ```
+
+## 特殊
+
+### init 函数
+init() 函数是 Go 语言中的一个特殊函数。它没有参数，也没有返回值，它的作用是在程序运行开始时自动执行一些初始化操作。在一个包中，可以定义多个 init() 函数，它们会按照它们在源代码中的顺序被调用。
+
+在 Go 语言中，init() 函数的使用场景主要有两个方面：
+
+初始化包：init() 函数通常用来初始化包，执行一些全局的初始化操作。比如，你可以在 init() 函数中打开数据库连接、初始化全局变量、加载配置文件等。
+注册：在某些情况下，你可能希望在程序启动时执行一些特定的操作，但不希望依赖于包的导入顺序。这时可以使用 init() 函数来注册需要在程序启动时执行的代码。

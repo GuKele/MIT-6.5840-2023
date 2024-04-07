@@ -220,7 +220,7 @@ func (rf *Raft) SendAppendEntriesRPC(server int, args *AppendEntriesArgs, reply 
 /*
  * Broadcast heartbeat! 心跳不在承担发送人日志的事情，只是单纯的心跳，最多加上leader commit id的传递！
  */
-func (rf *Raft) BroadcastHeartBeat() {
+func (rf *Raft)  BroadcastHeartBeat() {
 
 	rf.ResetHeartBeat()
 
