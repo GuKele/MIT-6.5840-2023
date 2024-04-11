@@ -93,6 +93,7 @@ func make_config(t *testing.T, n int, unreliable bool, snapshot bool) *config {
 	cfg.net.LongDelays(true)
 
 	applier := cfg.applier
+	// 如果开启快照，那么就使用这个
 	if snapshot {
 		applier = cfg.applierSnap
 	}
@@ -139,28 +140,28 @@ func (cfg *config) crash1(i int) {
 		raftlog := cfg.saved[i].ReadRaftState()
 		snapshot := cfg.saved[i].ReadSnapshot()
 		cfg.saved[i] = &Persister{}
-		cfg.saved[i].Save(raftlog, snapshot)
+		cfg.saved[i].SaveStateAndSnapshot(raftlog, snapshot)
 	}
 }
 
-// 检查i号server的m这条log是否跟其他也已经提交相同id的log内容一样
+// 检查i号server的m这条log是否跟其他也已经apply的相同id的log内容一样，如果没有出错，那么就加入到cfg.logs中
 func (cfg *config) checkLogs(i int, m ApplyMsg) (string, bool) {
 	err_msg := ""
 	v := m.Command
 	for j := 0; j < len(cfg.logs); j++ {
 		// old 和 oldok 是interface{},是一个command
-		if old, oldok := cfg.logs[j][m.CommandIndex]; oldok && old != v {
+		if old, oldok := cfg.logs[j][m.CommandId]; oldok && old != v {
 			// log.Printf("%v: log %v; server %v\n", i, cfg.logs[i], cfg.logs[j])
 			Debug(dError, "\n    S%v log:%v\n    S%v log:%v", i, cfg.logs[i], j, cfg.logs[j])
 			// some server has already committed a different value for this entry!
 			err_msg = fmt.Sprintf("commit index=%v server=%v %v != server=%v %v",
-				m.CommandIndex, i, m.Command, j, old)
+				m.CommandId, i, m.Command, j, old)
 		}
 	}
-	_, prevok := cfg.logs[i][m.CommandIndex-1]
-	cfg.logs[i][m.CommandIndex] = v
-	if m.CommandIndex > cfg.maxIndex {
-		cfg.maxIndex = m.CommandIndex
+	_, prevok := cfg.logs[i][m.CommandId-1]
+	cfg.logs[i][m.CommandId] = v
+	if m.CommandId > cfg.maxIndex {
+		cfg.maxIndex = m.CommandId
 	}
 	return err_msg, prevok
 }
@@ -174,9 +175,9 @@ func (cfg *config) applier(i int, applyCh chan ApplyMsg) {
 			cfg.mu.Lock()
 			err_msg, prevok := cfg.checkLogs(i, m)
 			cfg.mu.Unlock()
-			if m.CommandIndex > 1 && prevok == false {
+			if m.CommandId > 1 && prevok == false {
 				// err_msg = fmt.Sprintf("server %v apply out of order %v", i, m.CommandIndex)
-				err_msg = fmt.Sprintf("server %v apply out of order %v 啊", i, m.CommandIndex)
+				err_msg = fmt.Sprintf("server %v apply out of order %v 啊", i, m.CommandId)
 			}
 			if err_msg != "" {
 				log.Fatalf("apply error: %v", err_msg)
@@ -217,6 +218,7 @@ func (cfg *config) ingestSnap(i int, snapshot []byte, index int) string {
 
 const SnapShotInterval = 10
 
+// 这里就是模拟下层状态机去应用日志或快照
 // periodically snapshot raft state
 func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 	cfg.mu.Lock()
@@ -230,11 +232,11 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 		err_msg := ""
 		if m.SnapshotValid {
 			cfg.mu.Lock()
-			err_msg = cfg.ingestSnap(i, m.Snapshot, m.SnapshotIndex)
+			err_msg = cfg.ingestSnap(i, m.Snapshot, m.SnapshotId)
 			cfg.mu.Unlock()
 		} else if m.CommandValid {
-			if m.CommandIndex != cfg.lastApplied[i]+1 {
-				err_msg = fmt.Sprintf("server %v apply out of order, expected index %v, got %v", i, cfg.lastApplied[i]+1, m.CommandIndex)
+			if m.CommandId != cfg.lastApplied[i]+1 {
+				err_msg = fmt.Sprintf("server %v apply out of order, expected index %v, got %v", i, cfg.lastApplied[i]+1, m.CommandId)
 			}
 
 			if err_msg == "" {
@@ -242,25 +244,25 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 				var prevok bool
 				err_msg, prevok = cfg.checkLogs(i, m)
 				cfg.mu.Unlock()
-				if m.CommandIndex > 1 && prevok == false {
-					err_msg = fmt.Sprintf("server %v apply out of order %v", i, m.CommandIndex)
+				if m.CommandId > 1 && prevok == false {
+					err_msg = fmt.Sprintf("server %v apply out of order %v", i, m.CommandId)
 				}
 			}
 
 			cfg.mu.Lock()
-			cfg.lastApplied[i] = m.CommandIndex
+			cfg.lastApplied[i] = m.CommandId
 			cfg.mu.Unlock()
 
-			if (m.CommandIndex+1)%SnapShotInterval == 0 {
+			if (m.CommandId+1)%SnapShotInterval == 0 {
 				w := new(bytes.Buffer)
 				e := labgob.NewEncoder(w)
-				e.Encode(m.CommandIndex)
+				e.Encode(m.CommandId)
 				var xlog []interface{}
-				for j := 0; j <= m.CommandIndex; j++ {
+				for j := 0; j <= m.CommandId; j++ {
 					xlog = append(xlog, cfg.logs[i][j])
 				}
 				e.Encode(xlog)
-				rf.Snapshot(m.CommandIndex, w.Bytes())
+				rf.Snapshot(m.CommandId, w.Bytes())
 			}
 		} else {
 			// Ignore other types of ApplyMsg.

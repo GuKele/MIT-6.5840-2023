@@ -191,6 +191,8 @@ func (rf *Raft) RequestVoteAndHandleReply(server int, args *RequestVoteArgs, vot
 
 				if *voted_count == len(rf.peers) / 2 + 1 { // 只在第一次到达大多数时唤醒
 
+					// TODO(gukele): 初始化match_id_ 和 next_id_?
+
 					rf.SetRole(RoleLeader)
 
 					rf.mu.Unlock()

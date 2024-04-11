@@ -64,8 +64,44 @@ leader会定时向follower发送心跳，并且也会有日志添加，一个ser
 但是这又会引入另外一个问题：假如有三个节点1，2，3，都只有日志1，当leader1接收到日志2时，发送了server2，server2添加该日志并返回reply，leader1收到后reply后apply日志2，与此同时leader1挂掉，server3没有收到日志。server2就会竞选成为新leader，此时也没有客户端发送新日志了，server2也无法apply非自己任期的日志，一直这样下去客户端一直无法查询已经apply的日志2。one测试的时候也会通不过，这样出现的机率很低，往往发生在最后一条one的时候，一个接收到日志但是后面因为心跳原因超时选举为新的leader。
 似乎在leader当选后马上发送一条空日志可以解决这个问题，之前出现这种情况的时候选举超时时间是心跳间隔的两倍，但是我把心跳时间缩短，把选举超时时间设置为心跳时间的4倍 + 随机时间，选举时间就是心跳间隔4-7倍，然后测试几百次不会再出现上述情况。但是这只是减小了发生该情况的机率，真正解决办法还得是leader当选后马上发送一条空日志！
 
+### append entries reply 优化
+
+``` go
+type AppendEntriesReply struct {
+	Term_    int // 答复者的term,用来让leader做更新
+	Success_ bool
+
+	// optimization, not necessary
+	XLen_ int // log id of follower's last log. if it is to short, leader next id is that
+
+	// 如果leader包含XTerm_的日志，那么就从该term的最后一条作为next开始尝试同步。如果leader不包含该XTerm_的日志，那么就从XIndex_开始尝试同步，即直接跳过follower中该term所有的日志。
+	XTerm_ int // term in the conflicting prev entry (if any)
+	XId_   int // id of first entry with that term (if any)
+
+	// 如果leader不包含该term的日志，说明follower中该term的日志应该都是错的，是因为网络分区旧leader或者跟旧leader在同一个分区导致的无效的log.那么该term的日志都是无效的，next就可以直接跳过该term。
+	// 如果leader包含该term的日志说明该follower中该term的日志可能有一些是正确的，也就是说leader包含的该term的都是正确的，所以从leader该term的最后一条开始发送。
+
+	// 与论文中一条一条日志进行同步相比，这种方法相当于一个一个term进行同步，可以节省大量的RPC数量，从而节省时间。
+	// 从直觉上来讲，一个Follower如果与Leader有冲突的日志，那么这个Follower要么是一个旧的Leader，在宕机前接收了日志但是还没来得及与其他Follower同步，要么是一个和旧的Leader在同一个网络分区的Follower。
+	// 在网络恢复后或者宕机重启后，新Leader的term必然比之前大，之前的term接收的但未同步的日志是要被覆写的，因此一个一个term进行同步是合理的。
+}
+```
+
 ## 持久化
 
 避免冗余的持久化
 小分区leader还是统计一下心跳的reply，没必要啊，不然小分区也会不停的选举，这没什么意义，无非就是客户端能更快的找到真的leader。
 现在速度慢是为什么呢？慢在哪里了啊！！！！ 持久化的地方好好优化一下
+
+
+
+
+## 快照
+
+我们暂且不考虑内存中的日志，我们只考虑未丢弃的日至，不管它在内存还是在磁盘。对于打快照的点，在点之前的日子都会被丢弃。此时就存在一个问题，首先打快照的点一定是commit的点，意味着在这之前的日志都被多数复制了，那么可能存在部分日志没有被少数节点复制。少数节点分为以下两种情况：
+
+1. 少数节点是已经掉线的，他们重新上线需要传快照（这些节点缺少大量的日志）。
+2. 可能因为网络等原因，暂时少复制了几条日志的节点，比如恰好就少了打快照点的那条日志，重新给这种节点传快照很浪费。
+
+如果我们选择leader不丢弃还有follower需要的日志，这样如果一个Follower关机了一周，那么leader这一周都没法通过快照来减少自己内存消耗，那存在很严重的问题。
+Raft选择的方法是，Leader可以丢弃Follower需要的Log。所以，我们需要某种机制让AppendEntries能处理某些Follower Log的结尾到Leader Log开始之间丢失的这一段Log。解决方法是（一个新的消息类型）InstallSnapshot RPC。

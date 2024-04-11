@@ -63,6 +63,8 @@ array_name := [...]data_type{initial list} // 编译器推断数组大小
 ```
 
 ## 切片(动态数组)
+go语言中，切片操作并不是复制，而是对原来数组的引用，所以导致底层的完整数组不会被释放。（虽然不同于内存泄漏，但是没有引用到的数据也不会被释放）
+go语言的slice就有点特殊了，go语言的slice和c++的vector的实现不一样，c++ vector是三个指针(begin, end, cap); 而go的slice是一个指针+两个int(begin, int len, int cap)，这就导致如果你传值，那么你在里头修改已经存在的元素则没问题，但是如果你增删元素， 那么len和cap是不会改变的，甚至当你发生扩容的时候，那个新begin指针也不会改变。所以需要传递slice的指针。
 ``` go
 var slice1 []type = make([]type, len)
 var slice1 []type = make([]T, length, capacity) // make 也可以指定capacity，
@@ -73,9 +75,9 @@ len() 和 cap() 函数
 ```go
 map_variable := make(map[KeyType]ValueType, initialCapacity)
 m := map[string]int{
-    "apple": 1,
-    "banana": 2,
-    "orange": 3,
+  "apple": 1,
+  "banana": 2,
+  "orange": 3,
 }
 
 v1 := m["apple"]
@@ -94,22 +96,26 @@ slice1 = append(slice1, slice2...) // 有点像c++包展开
 ```
 
 ## range
+Go 语言中 range 关键字用于 for 循环中迭代数组(array)、切片(slice)、通道(channel)或集合(map)的元素。在数组和切片中它返回元素的索引和索引对应的值，在集合中返回 key-value 对。
 ```go
-// Go 语言中 range 关键字用于 for 循环中迭代数组(array)、切片(slice)、通道(channel)或集合(map)的元素。在数组和切片中它返回元素的索引和索引对应的值，在集合中返回 key-value 对。
 for key, value := range oldMap {
   newMap[key] = value
 }
 
-pow := []int{1, 2, 4, 8, 16, 32, 64, 128}
-for idx, val := range pow {
+array := []int{1, 2, 4, 8, 16, 32, 64, 128}
+for idx, val := range array {
   fmt.Printf("2**%d = %d\n", idx, val)
 }
 
+slice := make([]int, 10, 20)
+for idx, val := range slice {
+
+}
 ```
 
 ## lambda
 ``` go
-// 似乎全是隐士的引用捕获，不像c++还得需要自己捕获并且选择捕获类型，如果需要按值那就传参
+// 似乎全是隐式的引用捕获，不像c++还得需要自己捕获并且选择捕获类型，如果需要按值那就传参
 func (参数列别)(返回值列表) {
 
 }
@@ -117,6 +123,21 @@ func (参数列别)(返回值列表) {
 sum := func(int a, int b) (int) {
   return a + b
 }
+```
+## channel
+对于无缓冲，或者有缓冲channel缓冲区不够用时，就会阻塞。
+容易产生bug的是，当你加锁，然后ch <- ，接收方也是先加锁，然后 <-ch，这时候写channel的一方在因为channel而堵塞，没有释放锁，而接收方又需要先拿锁才能读channel，一个死锁就这样产生了...
+``` go
+ch1 := make(chan int)    // 无缓冲区
+ch2 := make(chan int, 4)    // 缓冲区大小为4，可以写入4个int
+ch3 := ch2     // channel是引用类型
+```
+
+## condition variant
+condition variant中的锁应该是保护临界区资源的，条件变量本身应该是不需要锁的，应该是和c++一样，但是还是wait会释放锁，所以条件变量中的锁不能为nil，也必须在wait前进行lock。
+``` go
+sync.Cond
+sync.NewCond()
 ```
 
 ## 包

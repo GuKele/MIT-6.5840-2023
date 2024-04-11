@@ -496,7 +496,8 @@ func TestRejoin2B(t *testing.T) {
 	cfg.connect(leader1)
 	log.Printf("Connect leader %v", leader1)
 
-	// BUG: 因为选出新的leader会立刻发送心跳,告诉之前的分区旧leader,现在的commit index,从而导致了就分区leader一些根本没有commit的本应该删掉的log,现在开始apply
+	// NOTE: 一个bug，因为选出新的leader会立刻发送心跳,告诉之前的分区旧leader,现在的commit index,从而导致了就分区leader一些根本没有commit的本应该删掉的log,现在开始apply。
+	// 所以commit id的更新必须是成功追加日志后，leader commit id 和 当前成功追加的日志后的id，两者在中取最小值，则为follower真正的commit id
 	cfg.one(104, 2, true)
 
 	// all together now
