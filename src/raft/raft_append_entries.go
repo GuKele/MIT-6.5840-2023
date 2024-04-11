@@ -222,7 +222,9 @@ func (rf *Raft) SendAppendEntriesRPC(server int, args *AppendEntriesArgs, reply 
  */
 func (rf *Raft)  BroadcastHeartBeat() {
 
+	rf.mu.Lock()
 	rf.ResetHeartBeat()
+	rf.mu.Unlock()
 
 	for peer := range rf.peers {
 		if peer == rf.me {
