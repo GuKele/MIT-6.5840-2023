@@ -76,6 +76,7 @@ func (rf *Raft) GetIndexOfLogId(log_id int) (int, bool) {
 	idx := log_id - rf.logs_[0].Id_
 
 	if idx >= len(rf.logs_) || idx < 0 {
+		idx = -1
 		exist = false
 	}
 	return idx, exist

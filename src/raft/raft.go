@@ -40,13 +40,13 @@ import (
 type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
-	CommandIndex int
+	CommandId    int
 
 	// For 2D:
 	SnapshotValid bool
 	Snapshot      []byte
 	SnapshotTerm  int
-	SnapshotIndex int
+	SnapshotId    int
 }
 
 type Role int
@@ -80,7 +80,7 @@ type Raft struct {
 	// Persistent state on all servers
 	cur_term_  int        // 服务器知道的最近任期，当服务器启动时初始化为0，单调递增。
 	voted_for_ int        // 当前任期中，该服务器给投过票的candidateId，如果没有则为null。持久化为了防止一个server在同一term投出多票，假如重启没有持久化这个，就可能投出多票
-	logs_      []LogEntry // 日志条目；每一条包含了状态机指令以及该条目被leader收到时的任期号]
+	logs_      []LogEntry // 日志条目；每一条包含了状态机指令以及该条目被leader收到时的任期号
 
 	// Volatile state on all servers
 	// 当一条日志(也代表之前的都完成了)被复制到大多数节点上时就是commit，然后leader会通知所有follower多少日志commit了,然后就可以apply。所以通常应该是[last_applied_, commit_id_]一个窗口一样
@@ -98,6 +98,7 @@ type Raft struct {
 	ticker_  *time.Ticker // 对于leader来说就是心跳计时器，那么对于follower来说就是选举计时器
 
 	replicator_cv_ []*sync.Cond // 用于唤醒所有的异步日志发送线程
+	applier_cv_    sync.Cond    // 用于唤醒applier应用日志到状态机
 }
 
 // return currentTerm and whether this server
@@ -368,6 +369,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 		timeout_: GetRandomElectionTimeout(),
 
 		replicator_cv_: make([]*sync.Cond, len(peers)),
+		applier_cv_:    *sync.NewCond(&sync.Mutex{}),
 	}
 
 	rf.ticker_ = time.NewTicker(rf.timeout_)
@@ -384,9 +386,12 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 		rf.next_id_[i] = rf.GetLastLogId() + 1
 		rf.match_id_[i] = 0
 
+		// rf.replicator_cv_[i] = sync.NewCond(&sync.Mutex{})
 		rf.replicator_cv_[i] = sync.NewCond(&sync.Mutex{})
 		go rf.Replicator(i)
 	}
+
+	go rf.applier()
 
 	// start ticker goroutine to start elections
 	go rf.ticker()

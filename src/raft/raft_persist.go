@@ -11,7 +11,7 @@ import (
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
 // before you've implemented snapshots, you should pass nil as the second argument to persister.Save().
-// after you've implemented snapshots, pass the current snapshot (or nil if there's not yet a snapshot).
+// after you've implemented 2D snapshots, pass the current snapshot (or nil if there's not yet a snapshot).
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:
@@ -21,14 +21,20 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// raftstate := w.Bytes()
 	// rf.persister.Save(raftstate, nil)
+
+	rf.persister.SaveRaftState(rf.getPersistState())
+	Debug(dPersist, "S%v Persist T:%v VF:%v LLI:%v", rf.me, rf.cur_term_, rf.voted_for_, rf.GetLastLogId())
+}
+
+func (rf *Raft) getPersistState() []byte {
 	wbuf := new(bytes.Buffer)
 	serializer := labgob.NewEncoder(wbuf)
 	serializer.Encode(rf.cur_term_)
 	serializer.Encode(rf.voted_for_)
 	serializer.Encode(rf.logs_)
 	raft_state := wbuf.Bytes()
-	rf.persister.Save(raft_state, nil)
-	Debug(dPersist, "S%v Persist T:%v VF:%v LLI:%v", rf.me, rf.cur_term_, rf.voted_for_, rf.GetLastLogId())
+
+	return raft_state
 }
 
 // restore previously persisted state.

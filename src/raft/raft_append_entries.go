@@ -157,37 +157,16 @@ func (rf *Raft) AppendEntriesRPC(args *AppendEntriesArgs, reply *AppendEntriesRe
 		//     1.自己本身已经添加的entries
 		//     2.并且leader告诉我们大部分都已经复制了该log,完成了两阶段提交的第一阶段,该进入第二阶段了
 		// 此时可以apply了
-		if rf.commit_id_ < Min(args.Leader_commit_id_, args.Prev_log_id_+len(args.Entries_)) {
+		if new_commit_id := Min(args.Leader_commit_id_, args.Prev_log_id_+len(args.Entries_)); rf.commit_id_ < new_commit_id {
 			// 无法确保rf.GetLastLogId == args.Entries_[len(args.Entries_)-1].Id_
 			// rf.commit_id_ = Min(args.Leader_commit_id_, rf.GetLastLogId())
 			old_commit_id := rf.commit_id_
-			rf.commit_id_ = Min(args.Leader_commit_id_, args.Prev_log_id_+len(args.Entries_))
+			rf.commit_id_ = new_commit_id
+			rf.applier_cv_.Signal()
 			Debug(dCommit, "S%v Updating CI:%v -> %v", rf.me, old_commit_id, rf.commit_id_)
 		}
 	}
 
-	rf.Apply()
-}
-
-// ApplyMsg是通知状态机,应用到状态机
-func (rf *Raft) Apply() {
-	if rf.last_applied_ < rf.commit_id_ {
-		old_last_applied := rf.last_applied_
-
-		begin, _ := rf.GetIndexOfLogId(rf.last_applied_ + 1)
-		end, _ := rf.GetIndexOfLogId(rf.commit_id_)
-
-		for ; begin <= end; begin++ {
-			rf.apply_ch_ <- ApplyMsg{
-				CommandValid: true,
-				Command:      rf.logs_[begin].Command_,
-				CommandIndex: rf.logs_[begin].Id_,
-			}
-			rf.last_applied_ += 1
-		}
-
-		Debug(dInfo, "S%v Apply LA:[%v, %v]", rf.me, old_last_applied+1, rf.last_applied_)
-	}
 }
 
 func Min(lhs int, rhs int) int {
@@ -195,6 +174,29 @@ func Min(lhs int, rhs int) int {
 		return lhs
 	}
 	return rhs
+}
+
+func (rf *Raft) tryCommit() bool {
+	// 尝试更新commit id, 一种方案是对next_idx_排序,然后中间的那个数就是大多数复制了最大id
+	match_id := make([]int, len(rf.match_id_))
+	copy(match_id, rf.match_id_)
+	sort.Slice(match_id, func(i, j int) bool {
+		return match_id[i] > match_id[j]
+	})
+
+	// NOTE(gukele)：被提交的日志被覆盖的问题，源论文中图8很详细的解释了这个问题，自己跑测中也发现了这个问题。首先先说总结：leader只能commit自己任期的日志，从而间接的提交之前任期的日志。
+	// 直接看原论文吧，讲的很清楚。
+	new_commit_id := match_id[len(rf.peers)/2]
+	log, _, exist := rf.GetLogOfLogId(new_commit_id)
+	if new_commit_id > rf.commit_id_ && exist && log.Term_ == rf.cur_term_ {
+		Debug(dCommit, "S%v Updating LCI %v -> %v", rf.me, rf.commit_id_, new_commit_id)
+		rf.commit_id_ = new_commit_id
+		return true
+	} else if !exist {
+		Debug(dError, "S%v Updating LCI %v -> %v but not find that log, maybe due to snapshot", rf.me, rf.commit_id_, new_commit_id)
+	}
+
+	return false
 }
 
 /*
@@ -220,7 +222,7 @@ func (rf *Raft) SendAppendEntriesRPC(server int, args *AppendEntriesArgs, reply 
 /*
  * Broadcast heartbeat! 心跳不在承担发送人日志的事情，只是单纯的心跳，最多加上leader commit id的传递！
  */
-func (rf *Raft)  BroadcastHeartBeat() {
+func (rf *Raft) BroadcastHeartBeat() {
 
 	rf.mu.Lock()
 	rf.ResetHeartBeat()
@@ -283,19 +285,20 @@ func (rf *Raft) HeartbeatOneRound(server int) {
 }
 
 func (rf *Raft) Replicator(server int) {
+	// condition variant中的锁应该是保护临界区资源的，条件变量本身应该是不需要锁的，应该是和c++一样，但是还是wait会释放锁，所以条件变量中的锁不能为nil，也必须在wait前进行lock。
 	rf.replicator_cv_[server].L.Lock()
 	defer rf.replicator_cv_[server].L.Unlock()
 
 	for !rf.killed() {
-		for !rf.NeedReplicating(server) {
-			rf.replicator_cv_[server].Wait()
+		for rf.needReplicating(server) { // FIXME(gukele): 之前循环语句是不需要复制时wait，这样好像导致传播慢，而且不知道怎么回事有时候传两下没有收到回复就不传了
+			// send one round append
+			rf.AppendEntriesOneRound(server)
 		}
-		// send one round append
-		rf.AppendEntriesOneRound(server)
+		rf.replicator_cv_[server].Wait()
 	}
 }
 
-func (rf *Raft) NeedReplicating(server int) bool {
+func (rf *Raft) needReplicating(server int) bool {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -357,25 +360,9 @@ func (rf *Raft) AppendEntriesOneRound(server int) {
 
 				Debug(dLog, "S%v <- S%v Ok append MI:%v", rf.me, server, new_match_id)
 
-				// 更新commit id, 一种方案是对next_idx_排序,然后中间的那个数就是大多数复制了最大id
-				match_id := make([]int, len(rf.match_id_))
-				copy(match_id, rf.match_id_)
-				sort.Slice(match_id, func(i, j int) bool {
-					return match_id[i] > match_id[j]
-				})
-
-				// BUG(gukele)：被提交的日志被覆盖的问题，源论文中图8很详细的解释了这个问题，自己跑测中也发现了这个问题。首先先说总结：leader只能commit自己任期的日志，从而间接的提交之前任期的日志。
-				// 直接看原论文吧，讲的很清楚。
-				new_commit_id := match_id[len(rf.peers)/2]
-				log, _, exist := rf.GetLogOfLogId(new_commit_id)
-				if new_commit_id > rf.commit_id_ && exist && log.Term_ == rf.cur_term_ {
-					Debug(dCommit, "S%v Updating LCI %v -> %v", rf.me, rf.commit_id_, new_commit_id)
-					rf.commit_id_ = new_commit_id
-				} else if !exist {
-					Debug(dError, "S%v Updating LCI %v -> %v but not find that log, maybe due to snapshot", rf.me, rf.commit_id_, new_commit_id)
+				if rf.tryCommit() {
+					rf.applier_cv_.Signal()
 				}
-
-				rf.Apply()
 
 			} else {
 
@@ -410,4 +397,55 @@ func (rf *Raft) AppendEntriesOneRound(server int) {
 			}
 		}
 	}
+}
+
+func (rf *Raft) applier() {
+	rf.applier_cv_.L.Lock()
+	defer rf.applier_cv_.L.Unlock()
+
+	for !rf.killed() {
+		// 考虑到如果if，apply期间，有新的commit id了，然后notify了，但是此时并没有wait，这个notify就丢失了。所以使用for循环来代替。
+		for logs, ok := rf.needAppling(); ok ; logs, ok = rf.needAppling() {
+			rf.apply(logs)
+		}
+		rf.applier_cv_.Wait()
+	}
+}
+
+func (rf *Raft) needAppling() ([]LogEntry, bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	ok := false
+	var logs []LogEntry
+	if rf.last_applied_ < rf.commit_id_ {
+		ok = true
+
+		begin, _ := rf.GetIndexOfLogId(rf.last_applied_)
+		end, _ := rf.GetIndexOfLogId(rf.commit_id_)
+		logs = rf.logs_[begin+1 : end+1]
+	}
+
+	return logs, ok
+}
+
+// ApplyMsg是通知状态机,应用到状态机
+func (rf *Raft) apply(logs []LogEntry) {
+	for _, log := range logs {
+		rf.apply_ch_ <- ApplyMsg{
+			CommandValid: true,
+			Command:      log.Command_,
+			CommandId:    log.Id_,
+		}
+	}
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if rf.last_applied_ != logs[0].Id_-1 {
+		Debug(dError, "S%v try Apply [%v, %v], but LA:%v CI:%v LLI:%v", logs[0].Id_, logs[len(logs)-1].Id_, rf.last_applied_, rf.commit_id_, rf.LogBack().Id_)
+	}
+
+	rf.last_applied_ = logs[len(logs)-1].Id_
+	Debug(dInfo, "S%v Apply LA:[%v, %v]", rf.me, logs[0].Id_, logs[len(logs)-1].Id_)
 }
