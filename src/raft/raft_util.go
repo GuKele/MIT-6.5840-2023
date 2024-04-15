@@ -8,8 +8,8 @@ import (
 
 const (
 	// 声明在函数外部，首字母小写则包内可见，大写则所有包可见
-	heartBeatTimeout             = 50 * time.Millisecond
-	electionTimeoutBase          = 4 * heartBeatTimeout
+	heartBeatInterval            = 50 * time.Millisecond
+	electionTimeoutBase          = 4 * heartBeatInterval
 	electionTimeoutRandIncrement = 150
 )
 
@@ -91,4 +91,18 @@ func (rf *Raft) GetLogOfLogId(log_id int) (LogEntry, int, bool) {
 	}
 
 	return log, idx, exist
+}
+
+func Min(lhs int, rhs int) int {
+	if lhs < rhs {
+		return lhs
+	}
+	return rhs
+}
+
+func Max(lhs int, rhs int) int {
+	if lhs > rhs {
+		return lhs
+	}
+	return rhs
 }

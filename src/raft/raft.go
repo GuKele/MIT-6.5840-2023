@@ -28,27 +28,6 @@ import (
 	"6.5840/labrpc"
 )
 
-// as each Raft peer becomes aware that successive log entries are
-// committed, the peer should send an ApplyMsg to the service (or
-// tester) on the same server, via the applyCh passed to Make(). set
-// CommandValid to true to indicate that the ApplyMsg contains a newly
-// committed log entry.
-//
-// in part 2D you'll want to send other kinds of messages (e.g.,
-// snapshots) on the applyCh, but set CommandValid to false for these
-// other uses.
-type ApplyMsg struct {
-	CommandValid bool
-	Command      interface{}
-	CommandId    int
-
-	// For 2D:
-	SnapshotValid bool
-	Snapshot      []byte
-	SnapshotTerm  int
-	SnapshotId    int
-}
-
 type Role int
 
 const (
@@ -80,7 +59,7 @@ type Raft struct {
 	// Persistent state on all servers
 	cur_term_  int        // 服务器知道的最近任期，当服务器启动时初始化为0，单调递增。
 	voted_for_ int        // 当前任期中，该服务器给投过票的candidateId，如果没有则为null。持久化为了防止一个server在同一term投出多票，假如重启没有持久化这个，就可能投出多票
-	logs_      []LogEntry // 日志条目；每一条包含了状态机指令以及该条目被leader收到时的任期号
+	logs_      []LogEntry // 日志条目；每一条包含了状态机指令以及该条目被leader收到时的任期号（第一条为哨兵，要么是0，要么就是当前快照最后一条日志）
 
 	// Volatile state on all servers
 	// 当一条日志(也代表之前的都完成了)被复制到大多数节点上时就是commit，然后leader会通知所有follower多少日志commit了,然后就可以apply。所以通常应该是[last_applied_, commit_id_]一个窗口一样
@@ -98,6 +77,8 @@ type Raft struct {
 	ticker_  *time.Ticker // 对于leader来说就是心跳计时器，那么对于follower来说就是选举计时器
 
 	replicator_cv_ []*sync.Cond // 用于唤醒所有的异步日志发送线程
+	// TODO(gukele)： 可以延迟apply，这样尽量避免从节点只差一点时就发送完整的日志。
+	// FIGURE OUT(gukele): 而且follower挂掉不停的传送日志或快照的问题如何解决？
 	applier_cv_    sync.Cond    // 用于唤醒applier应用日志到状态机
 }
 
@@ -136,10 +117,12 @@ func (rf *Raft) GetRole() Role {
 	return rf.role_
 }
 
-func (rf *Raft) SetRole(role Role) {
+func (rf *Raft) SetRoleAndTicker(role Role) {
+	old_role := rf.role_
+	rf.role_ = role
 	switch role {
 	case RoleLeader:
-		if rf.role_ != role {
+		if old_role != role {
 			Debug(dLeader, "S%v Converting to leader at T:%v", rf.me, rf.cur_term_)
 
 			// 变成leader后初始化一下next 和 match
@@ -153,11 +136,9 @@ func (rf *Raft) SetRole(role Role) {
 				rf.match_id_[peer] = 0
 			}
 
-			// 心跳
-			rf.ResetHeartBeat()
-			// rf.BroadcastHeartBeat()
+			rf.ResetHeartBeatInterval()
 
-			// 马上尝试发送一波
+			// 马上尝试发送一波日志添加，来代替心跳，还能进行next id回退、match id更新、leader commit id更新等。
 			for peer := range rf.peers {
 				if peer != rf.me {
 					rf.replicator_cv_[peer].Signal()
@@ -167,13 +148,11 @@ func (rf *Raft) SetRole(role Role) {
 	case RoleCandidate:
 		Debug(dTerm, "S%v Converting to candidate, begin election T:%v LLT:%v LLI:%v", rf.me, rf.cur_term_, rf.GetLastLogTerm(), rf.GetLastLogId())
 	case RoleFollower:
-		if rf.role_ != RoleFollower {
-			Debug(dInfo, "S%v %v -> %v", rf.me, rf.role_.String(), role.String())
+		if old_role != RoleFollower {
+			Debug(dInfo, "S%v %v -> %v", rf.me, old_role.String(), role.String())
 		}
-		rf.ResetTicker()
+		rf.ResetTimeout()
 	}
-
-	rf.role_ = role
 }
 
 func (rf *Raft) GetVotedFor() int {
@@ -201,22 +180,24 @@ func (rf *Raft) LogBack() LogEntry {
 	return rf.logs_[len(rf.logs_)-1]
 }
 
-func (rf *Raft) ResetTicker() {
+// 超时时间
+func (rf *Raft) ResetTimeout() {
 
 	rf.timeout_ = GetRandomElectionTimeout()
 	rf.ticker_.Reset(rf.timeout_)
 	// log.Printf("We reset %v ticker %v \n", rf.me, rf.timeout_)
 }
 
-func (rf *Raft) ResetTickerWith(timeout time.Duration) {
+func (rf *Raft) ResetTimeoutWith(timeout time.Duration) {
 
 	rf.timeout_ = timeout
 	rf.ticker_.Reset(rf.timeout_)
 }
 
-func (rf *Raft) ResetHeartBeat() {
+// 心跳间隔时间
+func (rf *Raft) ResetHeartBeatInterval() {
 
-	rf.timeout_ = heartBeatTimeout
+	rf.timeout_ = heartBeatInterval
 	rf.ticker_.Reset(rf.timeout_)
 }
 
@@ -377,6 +358,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
+	// FIXME(gukele): 此时还没有leader，所以没必要初始化next id、match id
 	for i := range rf.peers {
 		if i == rf.me {
 			rf.next_id_[i] = rf.GetLastLogId() + 1
@@ -386,7 +368,6 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 		rf.next_id_[i] = rf.GetLastLogId() + 1
 		rf.match_id_[i] = 0
 
-		// rf.replicator_cv_[i] = sync.NewCond(&sync.Mutex{})
 		rf.replicator_cv_[i] = sync.NewCond(&sync.Mutex{})
 		go rf.Replicator(i)
 	}

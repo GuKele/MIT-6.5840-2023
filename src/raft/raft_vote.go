@@ -61,7 +61,7 @@ func (rf *Raft) RequestVoteRPC(args *RequestVoteArgs, reply *RequestVoteReply) {
 		// 2 如果日志以相同的任期结尾，则更大索引的日志是最新的。
 		if args.Last_log_term_ > rf.GetLastLogTerm() || (args.Last_log_term_ == rf.GetLastLogTerm() && args.Last_log_id_ >= rf.GetLastLogId()) {
 			// 投票后重置自己的election timeout，防止马上自己又升级candidate又开始新选举。只要自己的票投不出去，自己又收不到心跳/日志更新，那么自己就可能变candidate
-			rf.SetRole(RoleFollower)
+			rf.SetRoleAndTicker(RoleFollower)
 			reply.Vote_granted_ = true
 			// TODO(gukele): 和set term一起序列化一次就行了
 			rf.SetVotedFor(args.Candidate_id_)
@@ -80,7 +80,7 @@ func (rf *Raft) RequestVoteRPC(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.SetTerm(args.Term_)
 
 		// NOTE(gukele): 搅屎棍问题，当有一个节点发生网络分区的问题，他就不停的选举失败，term变得很大，当其重新连接到集群，会让大家以为新的一轮选举，但是它日志落后，不可能成为新的leader,最终它就成为一个搅屎棍，然后让集群整个term变大了
-		rf.SetRole(RoleFollower) // 降为follower？可能是搅屎棍让leader降级；也可能是leader掉线后第一轮选举失败，candidate降级
+		rf.SetRoleAndTicker(RoleFollower) // 降为follower？可能是搅屎棍让leader降级；也可能是leader掉线后第一轮选举失败，candidate降级
 		try_vote()
 		return
 
@@ -147,7 +147,7 @@ func (rf *Raft) StartElection() {
 	// 给自己投票
 	rf.cur_term_ += 1
 	rf.voted_for_ = rf.me
-	rf.SetRole(RoleCandidate)
+	rf.SetRoleAndTicker(RoleCandidate)
 	rf.persist()
 	voted_count := 1 // 自己给自己的一票
 
@@ -159,7 +159,7 @@ func (rf *Raft) StartElection() {
 		Last_log_term_: rf.GetLastLogTerm(),
 	}
 
-	rf.ResetTicker()
+	rf.ResetTimeout()
 
 	rf.mu.Unlock()
 
@@ -183,21 +183,19 @@ func (rf *Raft) RequestVoteAndHandleReply(server int, args *RequestVoteArgs, vot
 		// log.Printf("%v get a vote result from %v in term %v \n", rf.me, server, args.Term_)
 		if rf.role_ == RoleCandidate && rf.cur_term_ == args.Term_ {
 			if reply.Term_ > rf.cur_term_ {
-				rf.SetRole(RoleFollower)
+				rf.SetRoleAndTicker(RoleFollower)
 				rf.SetTerm(reply.Term_)
 			} else if reply.Vote_granted_ {
 				*voted_count += 1
 				Debug(dVote, "S%v <- S%v Got vote", rf.me, server)
 
-				if *voted_count == len(rf.peers) / 2 + 1 { // 只在第一次到达大多数时唤醒
+				if *voted_count == len(rf.peers)/2+1 { // 只在第一次到达大多数时唤醒
 
-					// TODO(gukele): 初始化match_id_ 和 next_id_?
+					rf.SetRoleAndTicker(RoleLeader)
 
-					rf.SetRole(RoleLeader)
-
-					rf.mu.Unlock()
-					rf.BroadcastHeartBeat()
-					rf.mu.Lock()
+					// rf.mu.Unlock()
+					// rf.BroadcastHeartBeat()
+					// rf.mu.Lock()
 				}
 			}
 		}

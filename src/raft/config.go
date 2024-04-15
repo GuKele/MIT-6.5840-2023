@@ -67,6 +67,7 @@ type config struct {
 
 var ncpu_once sync.Once
 
+// unreliable是设置网络是否可靠
 func make_config(t *testing.T, n int, unreliable bool, snapshot bool) *config {
 	ncpu_once.Do(func() {
 		if runtime.NumCPU() < 2 {
@@ -201,6 +202,7 @@ func (cfg *config) ingestSnap(i int, snapshot []byte, index int) string {
 	var xlog []interface{}
 	if d.Decode(&lastIncludedIndex) != nil ||
 		d.Decode(&xlog) != nil {
+		Debug(dError, "S%v Snapshot decode error")
 		log.Fatalf("snapshot decode error")
 		return "snapshot Decode() error"
 	}
