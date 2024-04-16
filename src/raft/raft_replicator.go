@@ -8,7 +8,7 @@ func (rf *Raft) Replicator(server int) {
 	for !rf.killed() {
 		// FIXME(gukele): 之前循环语句是不需要复制时wait，这样好像导致传播慢，而且不知道怎么回事有时候传两下没有收到回复就不传了\
 		// FIXME(gukele): 当节点掉线后会无线重发，希望可以改进
-		for rf.needReplicating(server) {
+		for rf.needReplicating(server) && !rf.killed() {
 			// send one round append
 			rf.AppendEntriesOneRound(server)
 		}

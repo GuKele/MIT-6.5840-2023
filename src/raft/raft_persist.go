@@ -68,6 +68,10 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.voted_for_ = voted_for
 		rf.logs_ = logs
 	}
+
+	// FIXME(gukele): commit id 和 last apply应该设置成第一条日志把，如果有快照的话
+	rf.commit_id_ = rf.logs_[0].Id_
+	rf.last_applied_ = rf.logs_[0].Id_
 	Debug(dPersist, "S%v Read persist T:%v VF:%v", rf.me, rf.cur_term_, rf.voted_for_)
 
 }

@@ -12,6 +12,7 @@ package raft
 type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
+
 	CommandId    int
 
 	// For 2D:
@@ -33,7 +34,7 @@ func (rf *Raft) applier() {
 
 	for !rf.killed() {
 		// 考虑到如果if，apply期间，有新的commit id了，然后notify了，但是此时并没有wait，这个notify就丢失了。所以使用for循环来代替。
-		for data, ok := rf.needAppling(); ok; data, ok = rf.needAppling() {
+		for data, ok := rf.needAppling(); ok && !rf.killed(); data, ok = rf.needAppling() {
 			rf.apply(data)
 		}
 		rf.applier_cv_.Wait()

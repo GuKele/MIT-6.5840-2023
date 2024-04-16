@@ -79,7 +79,7 @@ type Raft struct {
 	replicator_cv_ []*sync.Cond // 用于唤醒所有的异步日志发送线程
 	// TODO(gukele)： 可以延迟apply，这样尽量避免从节点只差一点时就发送完整的日志。
 	// FIGURE OUT(gukele): 而且follower挂掉不停的传送日志或快照的问题如何解决？
-	applier_cv_    sync.Cond    // 用于唤醒applier应用日志到状态机
+	applier_cv_ sync.Cond // 用于唤醒applier应用日志到状态机
 }
 
 // return currentTerm and whether this server
@@ -108,6 +108,21 @@ func (rf *Raft) SetTerm(term int) {
 	rf.cur_term_ = term
 	rf.voted_for_ = -1
 	rf.persist()
+}
+
+func (rf *Raft) SetCommitId(commit_id int) bool {
+	if commit_id <= rf.commit_id_ {
+		return false
+	}
+
+	old_commit_id := rf.commit_id_
+	rf.commit_id_ = commit_id
+	if rf.role_ == RoleLeader {
+		Debug(dCommit, "S%v Updating LCI %v -> %v", rf.me, old_commit_id, rf.commit_id_)
+	} else {
+		Debug(dCommit, "S%v Updating CI:%v -> %v", rf.me, old_commit_id, rf.commit_id_)
+	}
+	return true
 }
 
 func (rf *Raft) GetRole() Role {

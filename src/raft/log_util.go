@@ -9,9 +9,13 @@ import (
 )
 
 // Debugging
-const DEBUG = true
+const (
+	DEBUG = true
+	ASSERT = true
+)
 
 type logTopic string
+
 const (
 	dClient  logTopic = "CLNT"
 	dCommit  logTopic = "CMIT"
@@ -30,8 +34,8 @@ const (
 	dVote    logTopic = "VOTE"
 	dWarn    logTopic = "WARN"
 	dHeart   logTopic = "HEAR"
+	dFatal   logTopic = "FATAL"
 )
-
 
 // Retrieve the verbosity level from an environment variable
 func getVerbosity() int {
@@ -46,7 +50,6 @@ func getVerbosity() int {
 	}
 	return level
 }
-
 
 var debugStart time.Time
 var debugVerbosity int
@@ -65,6 +68,21 @@ func Debug(topic logTopic, format string, a ...interface{}) {
 		time /= 100
 		prefix := fmt.Sprintf("%06d %v ", time, string(topic))
 		format = prefix + format
+		if topic == dFatal {
+			log.Fatalf(format, a...)
+		} else {
+			log.Printf(format, a...)
+		}
+	}
+}
+
+func Assert(expr bool, format string, a ...interface{}) {
+	if !expr && ASSERT {
+		time := time.Since(debugStart).Microseconds()
+		time /= 100
+		prefix := fmt.Sprintf("%06d %v ", time, string(dFatal))
+		format = prefix + format
+		log.Fatalf(format, a...)
 		log.Printf(format, a...)
 	}
 }

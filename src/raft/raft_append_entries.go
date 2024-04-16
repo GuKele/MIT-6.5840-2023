@@ -62,52 +62,62 @@ func (rf *Raft) AppendEntriesRPC(args *AppendEntriesArgs, reply *AppendEntriesRe
 	}
 
 	if args.Leader_term_ > rf.cur_term_ {
-		// TODO(gukele): set voted for？
 		rf.SetTerm(args.Leader_term_)
 	}
 
 	// 不管是candidate还是说旧分区重新连接上的旧leader，收到了AppendEntriesRPC就表明应该同意该leader，应该重设自己的身份，并且更新超时时间
 	rf.SetRoleAndTicker(RoleFollower)
-	// 这里要不要设置voted_for_已经无所谓了把，因为已经竞选完毕了，及时它现在投给同term的其他竞选者，也不可能选出多个leader了
-	// rf.SetVotedFor(args.Leader_id_)
 
-	// 尝试添加日志：如果日志条数对不上,或者prev log term对不上,说明prev log id是错误的
-	pre_log, pre_log_idx, _ := rf.GetLogOfLogId(args.Prev_log_id_)
+	// 1.说明是延迟的rpc请求
+	args_last_entries_id := args.Prev_log_id_
+	if len(args.Entries_) != 0 {
+		args_last_entries_id = args.Entries_[len(args.Entries_)-1].Id_
+	}
+	// Assert(rf.commit_id_ >= rf.logs_[0].Id_, "S%v CI:%v < SLI:%v", rf.me, rf.commit_id_, rf.logs_[0].Id_)
+	if args.Is_Heartbeat_ {
+		if args.Prev_log_id_ < rf.commit_id_ {
+			Debug(dHeart, "S%v -> S%v Not accept delay heartbeat PLI:%v < CI:%v", rf.me, args.Leader_id_, args.Prev_log_id_, rf.commit_id_)
+			return
+		}
+	} else if args_last_entries_id <= rf.commit_id_ {
+		reply.Success_ = true // 事实上leader的AppendEntriesOneRound一定是按顺序发的，上一次失败了才会发，但是以后可能会修改。
+		Debug(dLog, "S%v -> S%v Not accept delay log LI:(%v, %v] <= CI:%v", rf.me, args.Leader_id_, args.Prev_log_id_, args_last_entries_id, rf.commit_id_)
+	}
 
-	// 日志最大的id都小于pre log id
+	// 2.日志最大的id都小于pre log id
 	if rf.GetLastLogId() < args.Prev_log_id_ {
-
 		if args.Is_Heartbeat_ {
 			Debug(dHeart, "S%v -> S%v Not accept heartbeat PLI:%v > LLI:%v", rf.me, args.Leader_id_, args.Prev_log_id_, rf.GetLastLogId())
 		} else {
 			reply.XLen_ = rf.GetLastLogId()
 			Debug(dLog, "S%v -> S%v Not accept log PLI:%v > LLI:%v", rf.me, args.Leader_id_, args.Prev_log_id_, rf.GetLastLogId())
 		}
+		return
+	}
 
-	} else if pre_log.Term_ != args.Prev_log_term_ { // 日志中不存在改pre log(id相同时term不同)
-		// 现有条目与新条目（id相同但任期不同）发生冲突，删除当前及以后的所有条目
-
+	// 3.日志中pre log的id相同而term不同，发生冲突，删除当前及以后的所有条目
+	pre_log, pre_log_idx, exist := rf.GetLogOfLogId(args.Prev_log_id_)
+	Assert(exist, "S%v LI:[%v,%v] PLI:%v", rf.me, rf.logs_[0].Id_, rf.GetLastLogId(), args.Prev_log_id_)
+	if pre_log.Term_ != args.Prev_log_term_ {
 		if args.Is_Heartbeat_ {
-
-			Debug(dHeart, "S%v -> S%v Not accept heartbeat PLT:%v != XT:%v PLI:%v", rf.me, args.Leader_id_, args.Prev_log_term_, reply.XTerm_, args.Prev_log_id_)
-
+			Debug(dHeart, "S%v -> S%v Not accept heartbeat PLT:%v != XT:%v PLI:%v", rf.me, args.Leader_id_, args.Prev_log_term_, pre_log.Term_, args.Prev_log_id_)
 		} else {
-
 			reply.XTerm_ = pre_log.Term_
 			first_log_of_term, _ := rf.GetFirstLogOfTerm(pre_log.Term_)
 			reply.XId_ = first_log_of_term.Id_
 			Debug(dLog, "S%v -> S%v Not accept log PLT:%v != XT:%v PLI:%v XI:%v", rf.me, args.Leader_id_, args.Prev_log_term_, reply.XTerm_, args.Prev_log_id_, reply.XId_)
 
 			rf.logs_ = rf.logs_[:pre_log_idx]
-			if rf.GetLastLogId() < rf.commit_id_ {
-				Debug(dError, "S%v 丢弃了已经提交的日志 CI:%v LLI:%v", rf.me, rf.commit_id_, rf.GetLastLogId())
-				Debug(dTrace, "S%v Logs:%v", rf.me, rf.logs_)
-				log.Fatalf("Error!")
-			}
+			Assert(rf.GetLastLogId() >= rf.commit_id_, "S%v 丢弃了已经提交的日志 CI:%v LLI:%v", rf.me, rf.commit_id_, rf.GetLastLogId())
+
+			// FIXME(gukele): 需要持久化吗？
+			rf.persist()
 		}
+		return
+	}
 
-	} else { // 日志中存在pre log
-
+	// 4. pre log对的上
+	{
 		reply.Success_ = true
 		if args.Is_Heartbeat_ {
 			Debug(dHeart, "S%v -> S%v Accept Heartbeat LCI:%v T:%v LLI:%v", rf.me, args.Leader_id_, args.Leader_commit_id_, rf.cur_term_, rf.GetLastLogId())
@@ -160,16 +170,10 @@ func (rf *Raft) AppendEntriesRPC(args *AppendEntriesArgs, reply *AppendEntriesRe
 		//     2.并且leader告诉我们大部分都已经复制了该log,完成了两阶段提交的第一阶段,该进入第二阶段了
 		// 此时可以apply了
 		// TODO(gukele): 封装成setCommitId
-		if new_commit_id := Min(args.Leader_commit_id_, args.Prev_log_id_+len(args.Entries_)); rf.commit_id_ < new_commit_id {
-			// 无法确保rf.GetLastLogId == args.Entries_[len(args.Entries_)-1].Id_
-			// rf.commit_id_ = Min(args.Leader_commit_id_, rf.GetLastLogId())
-			old_commit_id := rf.commit_id_
-			rf.commit_id_ = new_commit_id
+		if rf.SetCommitId(Min(args.Leader_commit_id_, args.Prev_log_id_+len(args.Entries_))) {
 			rf.applier_cv_.Signal()
-			Debug(dCommit, "S%v Updating CI:%v -> %v", rf.me, old_commit_id, rf.commit_id_)
 		}
 	}
-
 }
 
 // leader尝试更新commit id.
@@ -185,15 +189,12 @@ func (rf *Raft) tryCommit() bool {
 	// 直接看原论文吧，讲的很清楚。
 	new_commit_id := match_id[len(rf.peers)/2]
 	log, _, exist := rf.GetLogOfLogId(new_commit_id)
-	if new_commit_id > rf.commit_id_ && exist && log.Term_ == rf.cur_term_ {
-		Debug(dCommit, "S%v Updating LCI %v -> %v", rf.me, rf.commit_id_, new_commit_id)
-		rf.commit_id_ = new_commit_id
-		return true
-	} else if !exist {
-		Debug(dError, "S%v Updating LCI %v -> %v but not find that log, maybe due to snapshot", rf.me, rf.commit_id_, new_commit_id)
+	Assert(exist, "S%v Don't have major commit log, LI:%v", rf.me, new_commit_id)
+	if log.Term_ == rf.cur_term_ {
+		return rf.SetCommitId(new_commit_id)
 	}
 
-	return false
+return false
 }
 
 /*
@@ -216,7 +217,6 @@ func (rf *Raft) AppendEntriesOneRound(server int) {
 		rf.mu.Unlock()
 		return
 	}
-
 
 	if rf.next_id_[server] <= rf.logs_[0].Id_ {
 		// 应该是发快照
@@ -269,13 +269,10 @@ func (rf *Raft) AppendEntriesOneRound(server int) {
 			// 但是也会带来一些问题，例如虽然保证match增加时才修改match和next，但是如果处于增加日志一直失败回退next的时候，中间穿插的心跳可能会导致一些回退被回退了。。。但是不会回退日志添加成功时的match和next！所以有利有弊吧。
 
 			new_match_id := args.Prev_log_id_ + len(args.Entries_)
-			if new_match_id < rf.match_id_[server] {
-				Debug(dError, "S%v Decreasing MI:%v -> %v", rf.me, rf.match_id_[server], new_match_id)
-				log.Fatalf("Error!")
-			}
+			Assert(new_match_id >= rf.match_id_[server], "S%v Decreasing MI:%v -> %v", rf.me, rf.match_id_[server], new_match_id)
+			Assert(new_match_id+1 >= rf.next_id_[server], "S%v Decreasing NI:%v -> %v", rf.me, rf.next_id_[server], new_match_id+1)
 			rf.next_id_[server] = new_match_id + 1
 			rf.match_id_[server] = new_match_id
-
 			Debug(dLog, "S%v <- S%v Ok append MI:%v", rf.me, server, new_match_id)
 
 			if rf.tryCommit() {
@@ -348,7 +345,7 @@ func (rf *Raft) HeartbeatOneRound(server int) {
 
 		// FIXME(gukele): 打快照以后，可能pre log被压缩了。
 		// 还是要有pre log的信息，因为server更新commit id需要这个来做判断
-		Prev_log_id_:   rf.next_id_[server] - 1,
+		Prev_log_id_: rf.next_id_[server] - 1,
 		// Prev_log_term_: rf.logs_[rf.next_id_[server]-1-rf.logs_[0].Id_].Term_,
 
 		Leader_commit_id_: rf.commit_id_,
@@ -360,7 +357,7 @@ func (rf *Raft) HeartbeatOneRound(server int) {
 	if args.Prev_log_id_ < rf.logs_[0].Id_ {
 		args.Prev_log_term_ = -1
 	} else {
-		args.Prev_log_term_ = rf.logs_[args.Prev_log_id_ - rf.logs_[0].Id_].Term_
+		args.Prev_log_term_ = rf.logs_[args.Prev_log_id_-rf.logs_[0].Id_].Term_
 	}
 
 	rf.mu.Unlock()
