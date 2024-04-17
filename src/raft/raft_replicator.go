@@ -6,8 +6,7 @@ func (rf *Raft) Replicator(server int) {
 	defer rf.replicator_cv_[server].L.Unlock()
 
 	for !rf.killed() {
-		// FIXME(gukele): 之前循环语句是不需要复制时wait，这样好像导致传播慢，而且不知道怎么回事有时候传两下没有收到回复就不传了\
-		// FIXME(gukele): 当节点掉线后会无线重发，希望可以改进
+		// FIXME(gukele): 当节点掉线后会无线重发，可以修改成rpc超时threshold次数，认为peer掉线，暂停日志添加，当收到该peer心跳回复后cv唤醒replicator继续日志添加。
 		for rf.needReplicating(server) && !rf.killed() {
 			// send one round append
 			rf.AppendEntriesOneRound(server)
@@ -21,7 +20,7 @@ func (rf *Raft) needReplicating(server int) bool {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	ok := rf.role_ == RoleLeader && rf.match_id_[server] < rf.GetLastLogId()
+	ok := (rf.role_ == RoleLeader && rf.match_id_[server] < rf.GetLastLogId())
 
 	return ok
 }

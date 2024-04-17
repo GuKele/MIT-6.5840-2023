@@ -1,5 +1,7 @@
 package raft
 
+import "time"
+
 // the service says it has created a snapshot that has
 // all info up to and including id. this means the
 // service no longer needs the log through (and including)
@@ -26,9 +28,9 @@ func (rf *Raft) Snapshot(id int, snapshot []byte) {
 	rf.logs_ = new_logs
 	rf.logs_[0].Command_ = nil
 
-	rf.persister.SaveStateAndSnapshot(rf.getPersistState(), snapshot)
-
 	Debug(dSnap, "S%v Snapshot SI:(0, %v], Persist T:%v VF:%v LLI:%v", rf.me, id, rf.cur_term_, rf.voted_for_, rf.GetLastLogId())
+
+	rf.persistStateAndSnap(snapshot)
 }
 
 type InstallSnapshotArgs struct {
@@ -72,9 +74,12 @@ func (rf *Raft) InstallSnapshotRPC(args *InstallSnapshotArgs, reply *InstallSnap
 	// 	// 等待更多数据块
 	// }
 
-	// FIGURE OUT(gukele): 为什么接受快照要与自己本身的快照比较，而非与last apply比较呢？或者与commit id比较，这样可以避免更多的重复应用啊
+	// 与last apply或者commit id比较，这样可以避免更多的重复apply
 	if args.Last_include_id_ < rf.logs_[0].Id_ {
 		Debug(dWarn, "S%v <- S%v Not accept snapshot SI:(0, %v] but already SI:(0，%v]", rf.me, args.Leader_id_, args.Last_include_id_, rf.logs_[0].Id_)
+		return
+	} else if args.Last_include_id_ < rf.last_applied_ || args.Last_include_id_ < rf.commit_id_ {
+		Debug(dWarn, "S%v <- S%v Not accept snapshot SI:(0, %v] but already SI:(0，%v] AI:%v CI:%v", rf.me, args.Leader_id_, args.Last_include_id_, rf.logs_[0].Id_, rf.last_applied_, rf.commit_id_)
 		return
 	}
 
@@ -96,12 +101,9 @@ func (rf *Raft) InstallSnapshotRPC(args *InstallSnapshotArgs, reply *InstallSnap
 		rf.logs_ = append(rf.logs_, sentry)
 	}
 
-	rf.persister.SaveStateAndSnapshot(rf.getPersistState(), args.Data_)
+	rf.persistStateAndSnap(args.Data_)
 
-
-	rf.commit_id_ = Max(rf.commit_id_, args.Last_include_id_)
-	// 应该交给applier去做把
-	if rf.last_applied_ < rf.commit_id_ {
+	if rf.SetCommitId(args.Last_include_id_) {
 		rf.applier_cv_.Signal()
 	}
 
@@ -117,9 +119,25 @@ func (rf *Raft) SendInstallSnapshotRPC(server int, args *InstallSnapshotArgs, re
 		return false
 	}
 
-	ok := rf.peers[server].Call("Raft.InstallSnapshotRPC", args, reply)
+	// ok := rf.peers[server].Call("Raft.InstallSnapshotRPC", args, reply)
+	// return ok
 
-	return ok
+	rpcTimer := time.NewTimer(RPCTimeout)
+	defer rpcTimer.Stop()
+
+	ch := make(chan bool, 1)
+	go func() {
+		if rf.peers[server].Call("Raft.InstallSnapshotRPC", args, reply) {
+			ch <- true
+		}
+	}()
+
+	select {
+	case <-ch:
+		return true
+	case <-rpcTimer.C:
+		return false
+	}
 }
 
 func (rf *Raft) InstallSnapshotOneRound(server int) {
@@ -167,6 +185,7 @@ func (rf *Raft) InstallSnapshotOneRound(server int) {
 		} else {
 			rf.match_id_[server] = Max(rf.match_id_[server], args.Last_include_id_)
 			rf.next_id_[server] = Max(rf.next_id_[server], args.Last_include_id_+1)
+			// rf.tryCommit()
 		}
 	}
 }

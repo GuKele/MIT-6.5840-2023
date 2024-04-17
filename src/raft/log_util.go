@@ -10,7 +10,7 @@ import (
 
 // Debugging
 const (
-	DEBUG = true
+	DEBUG  = true
 	ASSERT = true
 )
 

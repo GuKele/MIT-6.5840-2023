@@ -33,9 +33,17 @@ type Role int
 const (
 	RoleLeader Role = iota
 	RoleFollower
-	// NOTE(gukele): 类似两阶段选举的概念，为了解决搅屎棍term不断增长的问题，
-	// 在成为candidate之前，会有一个pre_candidate的状态RoleCandidate，收到集群大多数节点回复后才会变成candidate
 	RoleCandidate
+	// NOTE(gukele): 类似两阶段选举的概念，为了解决搅屎棍term不断增长的问题，在成为candidate之前，会有一个pre_candidate的状态RoleCandidate，收到集群大多数节点回复后才会变成candidate
+)
+
+const (
+	// 声明在函数外部，首字母小写则包内可见，大写则所有包可见
+	heartBeatInterval            = 50 * time.Millisecond
+	electionTimeoutBase          = 4 * heartBeatInterval
+	electionTimeoutRandIncrement = 150
+
+	RPCTimeout = 100 * time.Millisecond
 )
 
 type LogEntry struct {
@@ -77,9 +85,7 @@ type Raft struct {
 	ticker_  *time.Ticker // 对于leader来说就是心跳计时器，那么对于follower来说就是选举计时器
 
 	replicator_cv_ []*sync.Cond // 用于唤醒所有的异步日志发送线程
-	// TODO(gukele)： 可以延迟apply，这样尽量避免从节点只差一点时就发送完整的日志。
-	// FIGURE OUT(gukele): 而且follower挂掉不停的传送日志或快照的问题如何解决？
-	applier_cv_ sync.Cond // 用于唤醒applier应用日志到状态机
+	applier_cv_    sync.Cond    // 用于唤醒applier应用日志到状态机
 }
 
 // return currentTerm and whether this server
@@ -107,7 +113,7 @@ func (rf *Raft) SetTerm(term int) {
 	Debug(dTerm, "S%v Term update %v -> %v", rf.me, rf.cur_term_, term)
 	rf.cur_term_ = term
 	rf.voted_for_ = -1
-	rf.persist()
+	rf.persistState()
 }
 
 func (rf *Raft) SetCommitId(commit_id int) bool {
@@ -130,6 +136,10 @@ func (rf *Raft) GetRole() Role {
 	defer rf.mu.Unlock()
 
 	return rf.role_
+}
+
+func (rf *Raft) SetRoleToFollower() {
+	rf.role_ = RoleFollower
 }
 
 func (rf *Raft) SetRoleAndTicker(role Role) {
@@ -162,6 +172,7 @@ func (rf *Raft) SetRoleAndTicker(role Role) {
 		}
 	case RoleCandidate:
 		Debug(dTerm, "S%v Converting to candidate, begin election T:%v LLT:%v LLI:%v", rf.me, rf.cur_term_, rf.GetLastLogTerm(), rf.GetLastLogId())
+		// rf.ResetTimeout()
 	case RoleFollower:
 		if old_role != RoleFollower {
 			Debug(dInfo, "S%v %v -> %v", rf.me, old_role.String(), role.String())
@@ -182,7 +193,7 @@ func (rf *Raft) SetVotedFor(voted_for int) {
 		rf.voted_for_ = voted_for
 		Debug(dVote, "S%v Vote S%v", rf.me, voted_for)
 
-		rf.persist()
+		rf.persistState()
 	}
 }
 
@@ -246,7 +257,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	log_entry := rf.AppendNewEntry(command)
 	Debug(dClient, "S%v start a command:%v at T:%v LLI:%v", rf.me, command, rf.cur_term_, rf.GetLastLogId())
-	rf.persist()
+	rf.persistState()
 
 	rf.mu.Unlock()
 
@@ -303,7 +314,7 @@ func (rf *Raft) killed() bool {
 func (rf *Raft) ticker() {
 	Debug(dInfo, "S%v Start T:%v LLI:%v", rf.me, rf.cur_term_, rf.GetLastLogId())
 
-	for rf.killed() == false {
+	for !rf.killed() {
 		// Your code here (2A)
 		// Check if a leader election should be started.
 		select {
@@ -321,10 +332,6 @@ func (rf *Raft) ticker() {
 			// rf.mu.Unlock()
 		}
 
-		// // pause for a random amount of time between 50 and 350
-		// // milliseconds.
-		// ms := 50 + (rand.Int63() % 300)
-		// time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
 }
 
@@ -373,18 +380,9 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
-	// FIXME(gukele): 此时还没有leader，所以没必要初始化next id、match id
-	for i := range rf.peers {
-		if i == rf.me {
-			rf.next_id_[i] = rf.GetLastLogId() + 1
-			rf.match_id_[i] = rf.GetLastLogId()
-			continue
-		}
-		rf.next_id_[i] = rf.GetLastLogId() + 1
-		rf.match_id_[i] = 0
-
-		rf.replicator_cv_[i] = sync.NewCond(&sync.Mutex{})
-		go rf.Replicator(i)
+	for peer := range rf.peers {
+		rf.replicator_cv_[peer] = sync.NewCond(&sync.Mutex{})
+		go rf.Replicator(peer)
 	}
 
 	go rf.applier()

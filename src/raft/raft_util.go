@@ -6,13 +6,6 @@ import (
 	"time"
 )
 
-const (
-	// 声明在函数外部，首字母小写则包内可见，大写则所有包可见
-	heartBeatInterval            = 50 * time.Millisecond
-	electionTimeoutBase          = 4 * heartBeatInterval
-	electionTimeoutRandIncrement = 150
-)
-
 func GetRandomElectionTimeout() time.Duration {
 	return electionTimeoutBase + time.Duration(rand.Intn(electionTimeoutRandIncrement))*time.Millisecond
 }

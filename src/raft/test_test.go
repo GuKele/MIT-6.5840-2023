@@ -736,7 +736,7 @@ func TestPersist12C(t *testing.T) {
 	cfg.end()
 }
 
-func TestMy12C(t *testing.T) {
+func Test12CofMy(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
@@ -766,7 +766,7 @@ func TestMy12C(t *testing.T) {
 	cfg.end()
 }
 
-func TestMy22C(t *testing.T) {
+func Test22CofMy(t *testing.T) {
 	servers := 5
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
@@ -1252,12 +1252,84 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 	cfg.end()
 }
 
+func mySnapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash bool) {
+	iters := 30
+	servers := 3
+	cfg := make_config(t, servers, !reliable, true)
+	defer cfg.cleanup()
+
+	cfg.begin(name)
+
+	cfg.one(rand.Int(), servers, true)
+	leader1 := cfg.checkOneLeader()
+
+	for i := 0; i < iters; i++ {
+		victim := (leader1 + 1) % servers
+		sender := leader1
+		if i%3 == 1 {
+			sender = (leader1 + 1) % servers
+			victim = leader1
+		}
+
+		start := time.Now()
+		if disconnect {
+			cfg.disconnect(victim)
+			cfg.one(rand.Int(), servers-1, true)
+		}
+		if crash {
+			cfg.crash1(victim)
+			cfg.one(rand.Int(), servers-1, true)
+		}
+
+		// perhaps send enough to get a snapshot
+		nn := (SnapShotInterval / 2) + (rand.Int() % SnapShotInterval)
+		for i := 0; i < nn; i++ {
+			cfg.rafts[sender].Start(rand.Int())
+		}
+
+		// let applier threads catch up with the Start()'s
+		if disconnect == false && crash == false {
+			// make sure all followers have caught up, so that
+			// an InstallSnapshot RPC isn't required for
+			// TestSnapshotBasic2D().
+			cfg.one(rand.Int(), servers, true)
+		} else {
+			cfg.one(rand.Int(), servers-1, true)
+		}
+
+		if cfg.LogSize() >= MAXLOGSIZE {
+			cfg.t.Fatalf("Log size too large")
+		}
+		if disconnect {
+			// reconnect a follower, who maybe behind and
+			// needs to rceive a snapshot to catch up.
+			cfg.connect(victim)
+			cfg.one(rand.Int(), servers, true)
+			end := time.Now()
+			duration := end.Sub(start)
+			Debug(dTimer, "S%v victim discon-con-checkFinished duration is %v", victim, duration.Milliseconds())
+			leader1 = cfg.checkOneLeader()
+		}
+		if crash {
+			cfg.start1(victim, cfg.applierSnap)
+			cfg.connect(victim)
+			cfg.one(rand.Int(), servers, true)
+			leader1 = cfg.checkOneLeader()
+		}
+	}
+	cfg.end()
+}
+
 func TestSnapshotBasic2D(t *testing.T) {
 	snapcommon(t, "Test (2D): snapshots basic", false, true, false)
 }
 
 func TestSnapshotInstall2D(t *testing.T) {
 	snapcommon(t, "Test (2D): install snapshots (disconnect)", true, true, false)
+}
+
+func TestSnapshotInstall2DofMy(t *testing.T) {
+	mySnapcommon(t, "Test (2D): my install snapshots (disconnect)", true, true, false)
 }
 
 func TestSnapshotInstallUnreliable2D(t *testing.T) {

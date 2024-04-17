@@ -568,15 +568,23 @@ func (cfg *config) wait(index int, n int, startTerm int) interface{} {
 // if retry==false, calls Start() only once, in order
 // to simplify the early Lab 2B tests.
 // 就是start一个cmd,然后查看是否有expectedServers个以上的server提交了它.若提交返回该log的index.
-// 如果有server称自己是leader，start()成功后2s超时时间内检查是否有expectedServers复制了该日志,如果此时leader实际上是分区的old leader，两秒后就会超时，如果retry为false就不会重新尝试了，
-// 而retry为true时会重新尝试其他的leader去start
+// 遍历找到leader，即start()成功后，在2s超时时间内检查是否有expectedServers复制了该日志,如果此时leader实际上是分区的old leader，两秒后就会超时，如果retry为false就不会重新尝试了，
+// 而retry为true时则会重新尝试，总时间不超过十秒。
 func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
+	Debug(dTest, "One retry:%v expected %v servers CMD:%v", retry, expectedServers, cmd)
 	t0 := time.Now()
 	starts := 0
+
+	// logId := -1
+	// var rf *Raft
+	mat_cnt := -1
+
 	for time.Since(t0).Seconds() < 10 && cfg.checkFinished() == false {
 		// try all the servers, maybe one is the leader.
-		index := -1
+		logId := -1
 		var rf *Raft
+		// logId = -1
+		// rf = nil
 
 		for si := 0; si < cfg.n; si++ {
 			starts = (starts + 1) % cfg.n
@@ -587,33 +595,34 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			}
 			cfg.mu.Unlock()
 			if rf != nil {
-				index1, _, ok := rf.Start(cmd) // 尝试在可能是leader的server上start一条命令
+				logId1, _, ok := rf.Start(cmd) // 尝试在可能是leader的server上start一条命令
 				if ok {
-					index = index1
+					logId = logId1
 					break
 				}
 			}
 		}
 
-		if index != -1 {
+		if logId != -1 {
 			// somebody claimed to be the leader and to have submitted our command; wait a while for agreement.
-			Debug(dTest, "S%v One LI:%v CMD:%v", rf.me, index, cmd)
+			Debug(dTest, "S%v One retry:%v expected %v servers LI:%v CMD:%v", rf.me, retry, expectedServers, logId, cmd)
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
-				nd, cmd1 := cfg.nCommitted(index)
-				if nd > 0 && nd >= expectedServers {
+				cnt, cmd1 := cfg.nCommitted(logId)
+				mat_cnt = Max(cnt, mat_cnt)
+				if cnt > 0 && cnt >= expectedServers {
 					// committed
 					if cmd1 == cmd {
 						// and it was the command we submitted.
-						return index
+						return logId
 					}
 				}
 				time.Sleep(20 * time.Millisecond)
 			}
 			if retry == false {
-				nd, _ := cfg.nCommitted(index)
-				Debug(dError, "S%v One(%v) failed without retry %v < Ept:%v", rf.me, cmd, nd, expectedServers)
-				cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
+				cnt, _ := cfg.nCommitted(logId)
+				Debug(dError, "S%v One failed without Retry LI:%v CNT:%v < Expect:%v", rf.me, logId, cnt, expectedServers)
+				cfg.t.Fatalf("One(CMD:%v) failed to reach agreement", cmd)
 			}
 		} else {
 			time.Sleep(50 * time.Millisecond)
@@ -621,8 +630,10 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 	}
 
 	if cfg.checkFinished() == false {
-		Debug(dError, "One(%v) failed with retry Ept:%v", cmd, expectedServers)
-		cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
+		// Debug(dError, "S%v One failed with retry LI:%v CNT:%v < Expect:%v", rf.me, logId, mat_cnt, expectedServers)
+		Debug(dError, "One failed with retry CNT:%v < Expect:%v using Time:%vs", mat_cnt, expectedServers, time.Since(t0).Seconds())
+
+		cfg.t.Fatalf("One(CMD:%v) failed to reach agreement", cmd)
 	}
 	return -1
 }

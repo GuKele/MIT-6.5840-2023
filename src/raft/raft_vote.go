@@ -1,9 +1,5 @@
 package raft
 
-// "log/slog"
-// "fmt"
-// "time"
-
 //
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
@@ -63,7 +59,7 @@ func (rf *Raft) RequestVoteRPC(args *RequestVoteArgs, reply *RequestVoteReply) {
 			// 投票后重置自己的election timeout，防止马上自己又升级candidate又开始新选举。只要自己的票投不出去，自己又收不到心跳/日志更新，那么自己就可能变candidate
 			rf.SetRoleAndTicker(RoleFollower)
 			reply.Vote_granted_ = true
-			// TODO(gukele): 和set term一起序列化一次就行了
+			// FIXME(gukele): voted for和term一起序列化一次就行了
 			rf.SetVotedFor(args.Candidate_id_)
 
 			return true
@@ -73,18 +69,28 @@ func (rf *Raft) RequestVoteRPC(args *RequestVoteArgs, reply *RequestVoteReply) {
 		}
 	}
 
-	// 新的选举期了，不管你之前是否投过票，不管你是leader还是candidate,你现在需要重新投票了
+	// 新的选举期了，不管之前是否投过票，不管你是leader还是candidate，现在需要重新投票了
 	if args.Term_ > rf.cur_term_ {
 
 		rf.voted_for_ = -1
 		rf.SetTerm(args.Term_)
 
 		// NOTE(gukele): 搅屎棍问题，当有一个节点发生网络分区的问题，他就不停的选举失败，term变得很大，当其重新连接到集群，会让大家以为新的一轮选举，但是它日志落后，不可能成为新的leader,最终它就成为一个搅屎棍，然后让集群整个term变大了
-		rf.SetRoleAndTicker(RoleFollower) // 降为follower？可能是搅屎棍让leader降级；也可能是leader掉线后第一轮选举失败，candidate降级
+
+		// NOTE(gukele): 投出票才重置ticker，否则会出现不能成为leader的candidate轮流超时重新选举，导致本节点没有给它投票但是仍然重置了自己的超时时间。
+		// rf.SetRoleAndTicker(RoleFollower) // 降为follower？可能是搅屎棍让leader降级；也可能是leader掉线后第一轮选举失败，candidate降级
+
+		if rf.role_ == RoleLeader {
+			rf.ResetTimeout()
+		}
+		rf.role_ = RoleFollower
+
 		try_vote()
 		return
 
-	} else if args.Term_ == rf.cur_term_ {
+	}
+
+	if args.Term_ == rf.cur_term_ {
 
 		// 没有投过票 或者 之前的reply丢包了需要重新发
 		if rf.GetVotedFor() == -1 || rf.GetVotedFor() == args.Candidate_id_ {
@@ -130,11 +136,25 @@ func (rf *Raft) SendRequestVoteRPC(server int, args *RequestVoteArgs, reply *Req
 		return false
 	}
 
+	// rpcTimer := time.NewTimer(electionTimeoutBase)
+	// defer rpcTimer.Stop()
+
+	// ch := make(chan bool, 1)
+
+	// go func() {
+	// 	if rf.peers[server].Call("Raft.RequestVoteRPC", args, reply) {
+	// 		ch <- true
+	// 	}
+	// }()
+
+	// select {
+	// case <-rpcTimer.C:
+	// 	return false
+	// case <-ch:
+	// 	return true
+	// }
+
 	ok := rf.peers[server].Call("Raft.RequestVoteRPC", args, reply)
-	// 只重试一次！
-	if !ok {
-		ok = rf.peers[server].Call("Raft.RequestVoteRPC", args, reply)
-	}
 	return ok
 }
 
@@ -148,7 +168,7 @@ func (rf *Raft) StartElection() {
 	rf.cur_term_ += 1
 	rf.voted_for_ = rf.me
 	rf.SetRoleAndTicker(RoleCandidate)
-	rf.persist()
+	rf.persistState()
 	voted_count := 1 // 自己给自己的一票
 
 	// NOTE(gukele):逃逸分析！ 局部栈上变量is ok,go支持逃逸分析，会将对象转为堆上对象。

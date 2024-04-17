@@ -12,7 +12,7 @@ import (
 // see paper's Figure 2 for a description of what should be persistent.
 // before you've implemented snapshots, you should pass nil as the second argument to persister.Save().
 // after you've implemented 2D snapshots, pass the current snapshot (or nil if there's not yet a snapshot).
-func (rf *Raft) persist() {
+func (rf *Raft) persistState() {
 	// Your code here (2C).
 	// Example:
 	// w := new(bytes.Buffer)
@@ -24,6 +24,11 @@ func (rf *Raft) persist() {
 
 	rf.persister.SaveRaftState(rf.getPersistState())
 	Debug(dPersist, "S%v Persist T:%v VF:%v LLI:%v", rf.me, rf.cur_term_, rf.voted_for_, rf.GetLastLogId())
+}
+
+func (rf *Raft) persistStateAndSnap(snapshot []byte) {
+	rf.persister.SaveStateAndSnapshot(rf.getPersistState(), snapshot)
+	Debug(dPersist, "S%v Persist snapshot T:%v VF:%v LLI:%v SI:(0, %v]", rf.me, rf.cur_term_, rf.voted_for_, rf.GetLastLogId(), rf.logs_[0].Id_)
 }
 
 func (rf *Raft) getPersistState() []byte {
@@ -69,9 +74,9 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.logs_ = logs
 	}
 
-	// FIXME(gukele): commit id 和 last apply应该设置成第一条日志把，如果有快照的话
+	// commit id 和 last apply应该设置成第一条日志(可能会有快照)
 	rf.commit_id_ = rf.logs_[0].Id_
 	rf.last_applied_ = rf.logs_[0].Id_
-	Debug(dPersist, "S%v Read persist T:%v VF:%v", rf.me, rf.cur_term_, rf.voted_for_)
 
+	Debug(dPersist, "S%v Read persist T:%v VF:%v", rf.me, rf.cur_term_, rf.voted_for_)
 }

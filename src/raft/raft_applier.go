@@ -13,7 +13,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 
-	CommandId    int
+	CommandId int
 
 	// For 2D:
 	SnapshotValid bool
@@ -33,10 +33,12 @@ func (rf *Raft) applier() {
 	defer rf.applier_cv_.L.Unlock()
 
 	for !rf.killed() {
-		// 考虑到如果if，apply期间，有新的commit id了，然后notify了，但是此时并没有wait，这个notify就丢失了。所以使用for循环来代替。
+		// 考虑到如果使用if，apply期间，有新的commit id了，然后notify了，但是此时并没有wait，这个notify就丢失了。所以使用for循环来代替。
 		for data, ok := rf.needAppling(); ok && !rf.killed(); data, ok = rf.needAppling() {
 			rf.apply(data)
 		}
+
+		// FIXME(gukele)：可以延迟apply，类似组提交的原理，这样尽量避免从节点只差一点时就发送完整的日志。
 		rf.applier_cv_.Wait()
 	}
 }
@@ -65,7 +67,6 @@ func (rf *Raft) needAppling() (interface{}, bool) {
 
 	return data, ok
 }
-
 
 // ApplyMsg是通知状态机,应用到状态机
 func (rf *Raft) apply(data interface{}) {
