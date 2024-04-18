@@ -44,6 +44,8 @@ const (
 	electionTimeoutRandIncrement = 150
 
 	RPCTimeout = 100 * time.Millisecond
+
+	MaxRetries = 10; // 连续append entries rpc无回应时，认为follower crash，暂停日志发送，直到收到该日志心跳的reply才继续尝试日志添加
 )
 
 type LogEntry struct {
@@ -54,6 +56,7 @@ type LogEntry struct {
 
 // A Go object implementing a single Raft peer.
 type Raft struct {
+	// TODO(gukele): 使用共享锁来优化
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state

@@ -6,10 +6,13 @@ func (rf *Raft) Replicator(server int) {
 	defer rf.replicator_cv_[server].L.Unlock()
 
 	for !rf.killed() {
-		// FIXME(gukele): 当节点掉线后会无线重发，可以修改成rpc超时threshold次数，认为peer掉线，暂停日志添加，当收到该peer心跳回复后cv唤醒replicator继续日志添加。
-		for rf.needReplicating(server) && !rf.killed() {
+		// NOTE(gukele): 当节点掉线后会无限重发，rpc超时重传次数超过最大阈值，认为peer掉线，暂停日志添加，当收到该peer心跳回复后cv唤醒replicator继续日志添加。
+		cnt := 0
+		for rf.needReplicating(server) && !rf.killed() && cnt < MaxRetries {
 			// send one round append
-			rf.AppendEntriesOneRound(server)
+			if !rf.AppendEntriesOneRound(server) {
+				cnt++
+			}
 		}
 		rf.replicator_cv_[server].Wait()
 	}

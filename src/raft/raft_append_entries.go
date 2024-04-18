@@ -226,18 +226,18 @@ func (rf *Raft) SendAppendEntriesRPC(server int, args *AppendEntriesArgs, reply 
 }
 
 // call append entries request and handle reply
-func (rf *Raft) AppendEntriesOneRound(server int) {
+// 返回值表示rpc是否收到reply，即本次日志添加网络是否连通
+func (rf *Raft) AppendEntriesOneRound(server int) bool {
 	rf.mu.Lock()
 	if rf.role_ != RoleLeader {
 		rf.mu.Unlock()
-		return
+		return false
 	}
 
 	if rf.next_id_[server] <= rf.logs_[0].Id_ {
 		// 应该是发快照
-		rf.mu.Unlock()
-		rf.InstallSnapshotOneRound(server)
-		return
+		// rf.mu.Unlock()
+		return rf.InstallSnapshotOneRoundWithLock(server)
 	}
 
 	pre_log_idx, _ := rf.GetIndexOfLogId(rf.next_id_[server] - 1)
@@ -269,7 +269,7 @@ func (rf *Raft) AppendEntriesOneRound(server int) {
 		// if rf.cur_term_ == args.Leader_term_ && rf.role_ == RoleLeader && rf.match_id_[server] == args.Match_id_ {
 
 		if rf.cur_term_ != args.Leader_term_ || rf.role_ != RoleLeader {
-			return
+			return true
 		}
 
 		if reply.Success_ {
@@ -317,7 +317,10 @@ func (rf *Raft) AppendEntriesOneRound(server int) {
 				}
 			}
 		}
+		return true
 	}
+
+	return false
 }
 
 // ======================================heartbeat============================================
@@ -373,6 +376,9 @@ func (rf *Raft) HeartbeatOneRound(server int) {
 
 	reply := AppendEntriesReply{}
 	if rf.SendAppendEntriesRPC(server, &args, &reply) {
+
+		rf.replicator_cv_[server].Signal()
+
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
 		if rf.cur_term_ == args.Leader_term_ && rf.role_ == RoleLeader {

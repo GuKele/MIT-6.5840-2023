@@ -140,16 +140,17 @@ func (rf *Raft) SendInstallSnapshotRPC(server int, args *InstallSnapshotArgs, re
 	}
 }
 
-func (rf *Raft) InstallSnapshotOneRound(server int) {
+// 返回值是rpc是否收到reply，即本次快照添加是否网络连通
+func (rf *Raft) InstallSnapshotOneRoundWithLock(server int) bool {
 	if rf.killed() {
-		return
+		rf.mu.Unlock()
+		return false
 	}
 
-	rf.mu.Lock()
-
-	if rf.next_id_[server] > rf.logs_[0].Id_ {
-		Debug(dWarn, "S%v should send snapshot to S%v", rf.me, server)
-		return
+	// rf.mu.Lock()
+	if rf.role_ != RoleLeader {
+		rf.mu.Unlock()
+		return false
 	}
 
 	args := InstallSnapshotArgs{
@@ -176,7 +177,7 @@ func (rf *Raft) InstallSnapshotOneRound(server int) {
 		defer rf.mu.Unlock()
 
 		if rf.cur_term_ != args.Leader_term_ || rf.role_ != RoleLeader {
-			return
+			return true
 		}
 
 		if reply.Term_ > rf.cur_term_ {
@@ -187,5 +188,8 @@ func (rf *Raft) InstallSnapshotOneRound(server int) {
 			rf.next_id_[server] = Max(rf.next_id_[server], args.Last_include_id_+1)
 			// rf.tryCommit()
 		}
+		return true
 	}
+
+	return false
 }
